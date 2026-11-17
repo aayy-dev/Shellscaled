@@ -79,8 +79,19 @@ Checked on 2026-11-17 on the owner's `play` AVD (Android 17 / API 37, arm64, Goo
 - **Quick Settings tile:** it can be added, and while sign-in is needed, tapping it opens the app.
 - **Module removal:** with `remove` set, the next boot uninstalls the app. The module, its state, `tailscaled` and `tailscale0` are gone.
 
+Signed in (the owner signed in on the emulator; `accept-dns` and netfilter stayed off):
+- **Connection:** Overview shows Connected and both tailnet addresses. Disconnect and Connect switch the daemon between `Stopped` and `Running`.
+- **Tile:** shown as active while connected. Tapping it disconnects and reconnects without leaving the shade.
+- **Devices:** the tab's device and online counts match `tailscale status`, and searching for a name that doesn't exist shows "No matching devices".
+- **Exit nodes:**
+  - The picker lists the daemon's exit-node options and disables offline ones.
+  - Choosing one sets `ExitNodeID` and routes default traffic through `tailscale0`.
+  - Through a Linux VPS exit node, root DNS, TCP and ping worked.
+  - Through an Android TV exit node, traffic timed out, although that peer answered `tailscale ping` over DERP. This is most likely a limitation of that node and has not been diagnosed.
+
 Not yet verified:
-- Anything that needs a signed-in Tailscale account: connect/disconnect, devices, exit nodes, Taildrop transfers, and the sign-in QR with a real link.
+- Taildrop transfers. These need a file sent from another device.
+- The sign-in QR with a real link. Testing it would mean signing the owner out.
 - KernelSU and APatch.
 - Real TV hardware.
 
