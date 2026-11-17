@@ -10,6 +10,7 @@ import io.github.aayydev.shellscaled.R
 import io.github.aayydev.shellscaled.ShellscaledApplication
 import io.github.aayydev.shellscaled.rpc.Access
 import io.github.aayydev.shellscaled.rpc.Status
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,21 +32,29 @@ class ConnectTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val status = last
         if (working) return
-        if (status == null || status.state == "NeedsLogin" || status.state == "NeedsMachineAuth") {
-            openApp()
-            return
-        }
+        // Changing the VPN-like connection from the lock screen requires unlocking first.
+        if (isLocked) unlockAndRun { toggle() } else toggle()
+    }
+
+    private fun toggle() {
         working = true
-        render(status, busy = true)
+        render(last, busy = true)
         scope.launch {
             try {
+                // Act on the daemon's current state, not on what was read when the panel opened.
+                val status = currentStatus()
+                if (status == null || status.state == "NeedsLogin" || status.state == "NeedsMachineAuth") {
+                    openApp()
+                    return@launch
+                }
                 val reply = client.call(if (status.wantsRunning) "down" else "up")
                 last = reply.status() ?: last
                 if (last?.state == "NeedsLogin") openApp()
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
-                // Show the daemon's real state; the app explains failures.
+                // Show the daemon's real state below; the app explains failures.
             } finally {
                 working = false
                 refresh()
@@ -53,10 +62,16 @@ class ConnectTileService : TileService() {
         }
     }
 
+    private suspend fun currentStatus(): Status? = try {
+        if (client.access() != Access.READY) null else client.call("status").status()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+
     private suspend fun refresh() {
-        val status = runCatching {
-            if (client.access() != Access.READY) null else client.call("status").status()
-        }.getOrNull()
+        val status = currentStatus()
         last = status
         render(status, busy = false)
     }

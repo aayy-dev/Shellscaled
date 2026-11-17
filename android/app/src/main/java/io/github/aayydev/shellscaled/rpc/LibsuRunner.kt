@@ -4,17 +4,18 @@ import com.topjohnwu.superuser.Shell
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 /**
- * One persistent root shell through libsu, which handles Magisk, KernelSU and APatch `su`
- * differences. Commands are composed only by [HelperClient] from fixed paths and base64.
+ * Root shells through libsu, which handles Magisk, KernelSU and APatch `su` differences.
+ * Commands are composed only by [HelperClient] from fixed paths and base64.
  */
 class LibsuRunner : RootRunner {
-    // libsu shells are not reentrant; serialize every command on one thread.
-    private val executor = Executors.newSingleThreadExecutor { Thread(it, "shellscaled-root") }
+    // libsu delivers results on this executor; shells themselves serialize their own jobs.
+    private val executor = Executors.newCachedThreadPool { Thread(it, "shellscaled-root") }
 
     override suspend fun hasRoot(): Boolean = withContext(Dispatchers.IO) {
         val root = runCatching { Shell.getShell().isRoot }.getOrDefault(false)
@@ -24,12 +25,33 @@ class LibsuRunner : RootRunner {
         root
     }
 
-    override suspend fun run(command: String, timeoutMs: Long): RunResult = withTimeout(timeoutMs) {
+    override suspend fun run(command: String, timeoutMs: Long, isolated: Boolean): RunResult =
+        if (isolated) runIsolated(command, timeoutMs) else runShared(command, timeoutMs)
+
+    private suspend fun runShared(command: String, timeoutMs: Long): RunResult {
         val shell = withContext(Dispatchers.IO) { Shell.getShell() }
-        suspendCancellableCoroutine { continuation ->
-            shell.newJob().add(command).to(ArrayList(), null).submit(executor) { result ->
-                if (continuation.isActive) continuation.resume(RunResult(result.code, result.out.joinToString("\n")))
-            }
+        return try {
+            withTimeout(timeoutMs) { submit(shell, command) }
+        } catch (e: TimeoutCancellationException) {
+            // A hung quick call would queue every later call behind it; start a fresh shell.
+            withContext(Dispatchers.IO) { runCatching { shell.close() } }
+            throw e
+        }
+    }
+
+    private suspend fun runIsolated(command: String, timeoutMs: Long): RunResult {
+        val shell = withContext(Dispatchers.IO) { Shell.Builder.create().setTimeout(20).build() }
+        try {
+            if (!shell.isRoot) return RunResult(126, "")
+            return withTimeout(timeoutMs) { submit(shell, command) }
+        } finally {
+            withContext(Dispatchers.IO) { runCatching { shell.close() } }
+        }
+    }
+
+    private suspend fun submit(shell: Shell, command: String): RunResult = suspendCancellableCoroutine { continuation ->
+        shell.newJob().add(command).to(ArrayList(), null).submit(executor) { result ->
+            if (continuation.isActive) continuation.resume(RunResult(result.code, result.out.joinToString("\n")))
         }
     }
 

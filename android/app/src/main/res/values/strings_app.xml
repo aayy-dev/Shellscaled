@@ -16,4 +16,5 @@
     <string name="devices_exit_option" formatted="false">Offers exit node</string>
     <string name="tile_label" formatted="false">Tailscale</string>
     <string name="tile_unavailable" formatted="false">Open Shellscaled</string>
+    <string name="access_uninstall_app" formatted="false">Uninstall this app</string>
 </resources>

@@ -29,6 +29,10 @@ The interface strings come from upstream's WebUI translations: `tools/import_web
 - **Root grant:** uses libsu.
   - Magisk shows its own prompt.
   - KernelSU and APatch have no prompt; the app explains how to allow it in the manager and re-checks on Retry.
+- **Root shells:**
+  - Quick calls (status, settings) share one root shell. If a quick call times out, that shell is replaced.
+  - Slow or user-initiated actions each get their own short-lived shell: connect, sign-in, binary updates, commands and Taildrop receive. They never hold up status polling or the tile.
+- **Language:** the chosen language is also kept in the app's own preferences (only the language tag). This way the Quick Settings tile sends the same language to the helper when no activity is open.
 
 ## Build and test
 
@@ -50,9 +54,18 @@ The unit tests use synthetic data only:
 
 CI builds and signs the release APK with the repository secrets `SHELLSCALED_KEYSTORE_B64`, `SHELLSCALED_KEYSTORE_PASSWORD`, `SHELLSCALED_KEY_ALIAS` and `SHELLSCALED_KEY_PASSWORD`. It then checks the signer against [`app-signing-cert.sha256`](../.github/fork/app-signing-cert.sha256). Losing or changing the key prevents updates for existing installs.
 
-The APK is published as `Shellscaled-<version>-r<N>.apk` and is also bundled into every module ZIP as `app/Shellscaled.apk`, where it is covered by `SHA256SUMS`. The fork installer front end installs it with `pm install -r` after upstream's checks pass. A line appended to `uninstall.sh` removes it when the module is uninstalled.
+The APK is published as `Shellscaled-<version>-r<N>.apk` and is also bundled into every module ZIP as `app/Shellscaled.apk`, where it is covered by `SHA256SUMS`. The fork installer front end installs it with `pm install -r` after upstream's checks pass.
+
+When the module is removed, a hook at the top of `uninstall.sh` waits for boot to finish and uninstalls the app. Root managers run that script before Android's package manager starts. If the module is gone but the app remains, the app offers "Uninstall this app", which uses the system's confirmation dialog.
+
+The signing secrets are in the `app-signing` environment (restricted to `main`). Only the workflow's `app` job can read them, and that job builds fork code only.
 
 ## Not yet verified
 
 - None of this has run on a device or emulator. The rooted `Medium_Phone` AVD must be recreated first (`docs/emulator.md`).
-- Untested end to end: Magisk/KernelSU/APatch grant flows, `pm install` from each manager's installer, the Quick Settings tile, and real TV hardware.
+- Untested end to end:
+  - Magisk/KernelSU/APatch grant flows;
+  - `pm install` from each manager's installer;
+  - the background uninstall hook;
+  - the Quick Settings tile;
+  - real TV hardware.

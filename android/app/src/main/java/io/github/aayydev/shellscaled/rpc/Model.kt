@@ -132,9 +132,10 @@ data class CommandResult(val exitCode: Int, val stdout: String, val stderr: Stri
 data class TaildropDirectory(val name: String, val path: String)
 
 /**
- * Client-side mirror of the helper's interactive-login URL rule (helper/main.go allowedLoginURL).
- * The helper still validates again before opening anything; the app uses this only to decide
- * whether the link may be shown as text or as a QR code.
+ * Client-side filter for showing a sign-in link as text or a QR code. It mirrors the shape rules
+ * of the helper's allowedLoginURL (helper/main.go) but cannot see the daemon's ControlURL, so it
+ * accepts controlplane.tailscale.com links whatever the control server is. The helper applies the
+ * full rule before opening anything; the app itself never opens URLs.
  */
 object LoginUrl {
     private val tokenPath = Regex("^/a/[A-Za-z0-9_-]{1,512}$")

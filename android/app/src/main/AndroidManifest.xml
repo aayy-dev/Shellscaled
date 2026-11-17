@@ -6,6 +6,8 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <!-- No INTERNET permission: all networking stays in the root-owned module. -->
+    <!-- Only used to let the user remove this app (with the system's confirmation) once the module is gone. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <application
         android:name=".ShellscaledApplication"

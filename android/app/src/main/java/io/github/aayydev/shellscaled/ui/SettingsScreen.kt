@@ -50,7 +50,8 @@ private fun LanguageCard() {
 @Composable
 private fun NetworkCard(state: UiState, vm: MainViewModel) {
     val status = state.status
-    val ready = status != null && state.busy == null
+    // Network roles change only while the daemon's settings are confirmed (WebUI parity).
+    val ready = status != null && state.busy == null && state.settingsConfirmed
     var exitEnabledDraft by remember { mutableStateOf<Boolean?>(null) }
     val exitEnabled = exitEnabledDraft ?: (status?.exitNodeConfigured == true)
     LaunchedEffect(status?.exitNodeConfigured) { exitEnabledDraft = null }
@@ -70,11 +71,14 @@ private fun NetworkCard(state: UiState, vm: MainViewModel) {
         if (exitEnabled) ExitNodePicker(state, vm)
 
         if (status?.exitNodeConfigured == true) {
+            // The saved preference is exitNodeIPv6Takeover; exitNodeIPv6 only reports whether
+            // IPv6 is currently routed through the tunnel.
+            val takeover = state.exitIpv6Pending ?: status.exitNodeIPv6Takeover
             SwitchRow(
                 stringResource(R.string.w_network_exitIpv6), stringResource(R.string.w_network_exitIpv6Description),
-                checked = status.exitNodeIPv6 ?: true, enabled = ready, pending = state.busy == "exit-node-ipv6",
-            ) { vm.setExitNodeIPv6(it) }
-            ipv6Line(status)?.let { Message(it, MessageKind.MUTED) }
+                checked = takeover, enabled = ready, pending = state.busy == "exit-node-ipv6",
+            ) { if (it != takeover) vm.setExitNodeIPv6(it) }
+            ipv6Line(status, takeover)?.let { (text, kind) -> Message(text, kind) }
         }
 
         HorizontalDivider()
@@ -132,10 +136,12 @@ private fun exitSummary(status: Status?, state: UiState): UiText {
     }
 }
 
-private fun ipv6Line(status: Status): UiText? = when {
-    status.state != "Running" -> null
-    status.exitNodeIPv6 == false -> res(R.string.w_network_ipv6Physical)
-    status.exitNodeIPv6 == true && !status.exitNodeIPv6Takeover -> res(R.string.w_network_ipv6Bypass)
+/** Same rules as the WebUI (module/webroot/app.js, ipv6Line). */
+fun ipv6Line(status: Status, takeover: Boolean): Pair<UiText, MessageKind>? = when {
+    !status.exitNodeConfigured -> null
+    !takeover && status.exitNodeIPv6 == true -> res(R.string.w_network_ipv6Unsupported) to MessageKind.WARNING
+    !takeover -> res(R.string.w_network_ipv6Physical) to MessageKind.INFO
+    status.exitNodeIPv6 == false -> res(R.string.w_network_ipv6Bypass) to MessageKind.WARNING
     else -> null
 }
 
@@ -188,12 +194,13 @@ private fun AdvertiseSection(state: UiState, vm: MainViewModel) {
     SwitchRow(
         stringResource(R.string.w_network_exitAdvertisement),
         stringResource(if (blocked) R.string.w_network_exitAdvertisementBlocked else R.string.w_network_exitAdvertisementDescription),
-        checked = advertiseExit, enabled = status != null && state.busy == null && (!blocked || advertiseExit),
+        checked = advertiseExit, enabled = status != null && state.busy == null && state.settingsConfirmed && (!blocked || advertiseExit),
     ) { advertiseExit = it }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Button(
             { vm.saveAdvertise(routes, advertiseExit) }, Modifier.focusRing(),
-            enabled = status != null && state.busy == null && (routes != savedRoutes || advertiseExit != status.advertiseExitNode),
+            enabled = status != null && state.busy == null && state.settingsConfirmed &&
+                (routes != savedRoutes || advertiseExit != status.advertiseExitNode),
         ) { Text(stringResource(R.string.w_network_save)) }
     }
 }
@@ -249,7 +256,7 @@ private fun BinaryCard(state: UiState, vm: MainViewModel) {
         if (!current.isNullOrBlank()) Text(stringResource(R.string.w_binary_current) + ": " + current)
         if (binary?.checked == true && binary.latestVersion.isNotBlank()) Text(stringResource(R.string.w_binary_latest) + ": " + binary.latestVersion)
         val updating = state.busy == "binary-update"
-        val canUpdate = binary?.updateAvailable == true
+        val canUpdate = state.binaryUpdateAvailable()
         Button(
             { if (canUpdate) vm.binaryUpdate() else vm.binaryCheck() }, Modifier.focusRing(),
             enabled = state.busy == null && state.status != null,

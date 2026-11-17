@@ -62,10 +62,18 @@ data class UiState(
     val taildropError: UiText? = null,
     val commandResult: CommandResult? = null,
     val commandError: UiText? = null,
+    /** Optimistic IPv6 exit-node preference while its change is in flight. */
+    val exitIpv6Pending: Boolean? = null,
     /** A fixed or validated URL to show as a QR code because no browser could open it. */
     val qrUrl: String? = null,
 ) {
     fun setting(field: String): Boolean = pendingSettings[field] ?: status?.settings?.get(field) ?: false
+
+    /** WebUI binaryUpdateAvailable: a checked, supported update for the selected channel. */
+    fun binaryUpdateAvailable(): Boolean {
+        val b = binary ?: return false
+        return b.checked && b.supported && b.updateAvailable && (b.channel.isEmpty() || b.channel == status?.updateChannel)
+    }
 }
 
 class MainViewModel(private val client: HelperClient, private val clock: () -> Long = System::currentTimeMillis) : ViewModel() {
@@ -97,8 +105,18 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
     }
 
     fun checkAccess() = viewModelScope.launch {
-        _state.update { it.copy(access = Access.CHECKING) }
-        val access = runCatching { client.access() }.getOrDefault(Access.NO_ROOT)
+        val previous = _state.value.access
+        // Keep the UI while re-checking an already working connection (e.g. returning to the app).
+        if (previous != Access.READY) _state.update { it.copy(access = Access.CHECKING) }
+        val checked = try {
+            client.access()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        // An inconclusive check never claims the module is missing.
+        val access = checked ?: if (previous == Access.READY) Access.READY else Access.UNAVAILABLE
         _state.update { it.copy(access = access) }
         if (access == Access.READY) refreshStatus()
     }
@@ -120,9 +138,13 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
     private fun applyStatus(reply: Reply) {
         val status = reply.status() ?: return
         _state.update {
+            // A different update channel invalidates any earlier check result (WebUI syncUpdateChannel).
+            val channelChanged = it.status?.updateChannel != null && it.status.updateChannel != status.updateChannel
             it.copy(
                 status = status, statusError = null, updatedAt = clock(), needsVerify = false,
                 settingsConfirmed = status.daemonRunning, loginMessage = if (status.state == "NeedsLogin") it.loginMessage else null,
+                binary = if (channelChanged) null else it.binary,
+                binaryMessage = if (channelChanged) null else it.binaryMessage,
             )
         }
     }
@@ -168,7 +190,9 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
             _state.update { it.copy(loginMessage = res(R.string.w_login_opened)) }
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            // No browser (common on TV): the validated link stays available as text and QR.
+            // No browser (common on TV). The helper may have just created the link, so re-read
+            // status before offering it as text and QR.
+            refreshStatus()
             _state.update { it.copy(loginMessage = e.toUiText(), qrUrl = it.status?.loginUrl) }
         }
     }
@@ -245,7 +269,7 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
         client.call("exit-node", mapOf("exitNode" to JsonPrimitive(target)))
     }
 
-    fun setExitNodeIPv6(enabled: Boolean) = networkOp("exit-node-ipv6", null) {
+    fun setExitNodeIPv6(enabled: Boolean) = networkOp("exit-node-ipv6", null, onStart = { _state.update { it.copy(exitIpv6Pending = enabled) } }) {
         client.call("exit-node-ipv6", mapOf("exitNodeIPv6" to JsonPrimitive(enabled)))
     }
 
@@ -257,7 +281,9 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
         val list = routes.split(',').map(String::trim).filter(String::isNotEmpty)
         when {
             list.size > MAX_ROUTES -> _state.update { it.copy(networkError = res(R.string.w_network_routesTooMany)) }
-            list.any { !CIDR.matches(it) } -> _state.update { it.copy(networkError = res(R.string.w_network_routesInvalid)) }
+            // Same limits as the helper: no default routes here (that is the exit-node switch), 1024 chars.
+            routes.length > MAX_ROUTES_TEXT || list.any { !CIDR.matches(it) || it.endsWith("/0") } ->
+                _state.update { it.copy(networkError = res(R.string.w_network_routesInvalid)) }
             exitNode && _state.value.status?.let { it.exitNodeConfigured && !it.advertiseExitNode } == true ->
                 _state.update { it.copy(networkError = res(R.string.w_network_exitAdvertisementBlocked)) }
             else -> networkOp("advertise", res(R.string.w_network_advertiseSaved)) {
@@ -266,7 +292,10 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
         }
     }
 
-    private fun networkOp(action: String, success: UiText?, call: suspend () -> Reply) {
+    private fun networkOp(action: String, success: UiText?, onStart: () -> Unit = {}, call: suspend () -> Reply) {
+        // Like the WebUI, network roles change only while the daemon's settings are confirmed.
+        if (!_state.value.settingsConfirmed || _state.value.busy != null || _state.value.access != Access.READY) return
+        onStart()
         _state.update { it.copy(networkError = null, networkMessage = null) }
         op(action) {
             try {
@@ -276,7 +305,10 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 _state.update { it.copy(networkError = e.toUiText()) }
+                // The preference may be saved even if applying failed; re-read it.
                 refreshStatus()
+            } finally {
+                _state.update { it.copy(exitIpv6Pending = null) }
             }
         }
     }
@@ -286,7 +318,7 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
     fun binaryCheck() = binaryOp("binary-check", res(R.string.w_binary_currentStatus))
 
     fun binaryUpdate() {
-        if (_state.value.binary?.updateAvailable != true) return
+        if (!_state.value.binaryUpdateAvailable()) return
         binaryOp("binary-update", res(R.string.w_binary_completed))
     }
 
@@ -336,7 +368,8 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
             _state.update {
                 it.copy(
                     taildropDirs = reply.taildropDirectories().take(MAX_DIRS),
-                    taildropBrowse = reply.raw["path"]?.let { p -> (p as? JsonPrimitive)?.content } ?: path.ifEmpty { it.status?.taildropPath },
+                    // The helper returns the normalized browse location as taildropPath.
+                    taildropBrowse = reply.taildropPath ?: path.ifEmpty { it.status?.taildropPath },
                     taildropTruncated = reply.taildropDirectoriesTruncated,
                 )
             }
@@ -384,13 +417,21 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
         op("command") {
             _state.update { it.copy(commandError = null, commandResult = null) }
             try {
-                val reply = client.call("command", mapOf("command" to JsonPrimitive(command)))
-                if (reply.status() != null) applyStatus(reply)
-                _state.update { it.copy(commandResult = reply.command()) }
+                // A failing command still returns its output and exit code; show them.
+                val reply = client.call("command", mapOf("command" to JsonPrimitive(command)), acceptFailure = true)
+                val hasOutput = reply.raw.containsKey("stdout") || reply.raw.containsKey("stderr") || reply.ok
+                _state.update {
+                    it.copy(
+                        commandResult = if (hasOutput) reply.command() else null,
+                        commandError = reply.error?.takeIf(String::isNotBlank)?.let(UiText::Raw),
+                    )
+                }
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 _state.update { it.copy(commandError = e.toUiText()) }
             }
+            // Commands can change preferences or the connection; re-read status like the WebUI.
+            refreshStatus()
         }
     }
 
@@ -401,6 +442,7 @@ class MainViewModel(private val client: HelperClient, private val clock: () -> L
         const val MAX_DEVICES = 500
         const val MAX_DIRS = 128
         const val MAX_ROUTES = 16
+        const val MAX_ROUTES_TEXT = 1024
         private val CIDR = Regex("^[0-9A-Fa-f:.]+/[0-9]{1,3}$")
 
         fun joinTexts(a: UiText, b: UiText): UiText = UiText.Joined(a, b)

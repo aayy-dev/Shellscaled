@@ -6,6 +6,8 @@ import io.github.aayydev.shellscaled.rpc.HelperClient
 import io.github.aayydev.shellscaled.rpc.HelperException
 import io.github.aayydev.shellscaled.rpc.LoginUrl
 import io.github.aayydev.shellscaled.rpc.ModulePaths
+import io.github.aayydev.shellscaled.ui.Language
+import io.github.aayydev.shellscaled.ui.choosableTaildropPath
 import io.github.aayydev.shellscaled.ui.formatLastSeen
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
@@ -34,12 +36,42 @@ class HelperClientTest {
         assertEquals(setOf("action", "locale", "settings"), request.keys)
     }
 
-    @Test fun shellMetacharactersNeverReachTheShell() = runTest {
+    @Test fun commandTextOnlyTravelsInsideTheEncodedJson() = runTest {
         runner.responses["command"] = { 0 to """{"ok":true,"exitCode":0,"stdout":"x","settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"advertiseExitNode":false}""" }
-        client.call("command", mapOf("command" to JsonPrimitive("tailscale status; rm -rf / \$(id) `id` | cat")))
-        val argument = runner.commands.single().substringAfter(" rpc ")
-        assertFalse(argument.any { it in ";|&$`'\" \n" })
-        assertEquals("tailscale status; rm -rf / \$(id) `id` | cat", runner.requests.single()["command"]!!.jsonPrimitive.content)
+        val hostile = "tailscale status; rm -rf / \$(id) `id` | cat\n'\""
+        client.call("command", mapOf("command" to JsonPrimitive(hostile)))
+        // The shell line is exactly: <fixed helper> rpc <one base64 token>. Nothing else.
+        val tokens = runner.commands.single().split(' ')
+        assertEquals(listOf(ModulePaths.HELPER, "rpc"), tokens.take(2))
+        assertEquals(3, tokens.size)
+        assertTrue(Regex("^[A-Za-z0-9+/]+={0,2}$").matches(tokens[2]))
+        assertFalse(runner.commands.single().contains("rm -rf"))
+        // ...and the helper receives the text unchanged, as data.
+        assertEquals(hostile, runner.requests.single()["command"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun longActionsRunInTheirOwnShell() = runTest {
+        listOf("status", "binary-update", "command", "up").forEach { action ->
+            runner.responses[action] = { 0 to FakeRunner.status() }
+            client.call(action, if (action == "command") mapOf("command" to JsonPrimitive("tailscale version")) else emptyMap())
+        }
+        assertEquals(false, runner.isolation["status"])
+        assertEquals(true, runner.isolation["binary-update"])
+        assertEquals(true, runner.isolation["command"])
+        assertEquals(true, runner.isolation["up"])
+    }
+
+    @Test fun failedCommandKeepsItsOutput() = runTest {
+        runner.responses["command"] = { 1 to """{"ok":false,"exitCode":1,"stdout":"","stderr":"no reply from peer","settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"advertiseExitNode":false}""" }
+        val reply = client.call("command", mapOf("command" to JsonPrimitive("tailscale ping x")), acceptFailure = true)
+        assertFalse(reply.ok)
+        assertEquals(1, reply.command().exitCode)
+        assertEquals("no reply from peer", reply.command().stderr)
+    }
+
+    @Test fun inconclusiveAccessCheckIsNotModuleMissing() = runTest {
+        runner.probeFails = true
+        assertNull(client.access())
     }
 
     @Test fun parsesStatus() = runTest {
@@ -88,7 +120,8 @@ class HelperClientTest {
         assertTrue(runner.commands.isEmpty())
     }
 
-    @Test fun loginUrlRuleMatchesTheHelper() {
+    /** Shape rules shared with the helper; ControlURL-dependent checks stay in the helper. */
+    @Test fun loginUrlShapeRules() {
         assertTrue(LoginUrl.allowed("https://login.tailscale.com/a/abc123_-X"))
         assertTrue(LoginUrl.allowed("https://controlplane.tailscale.com/a/abc"))
         assertTrue(LoginUrl.allowed("https://login.tailscale.com:443/a/abc"))
@@ -121,5 +154,23 @@ class HelperClientTest {
         }
         fail("expected HelperException")
         throw AssertionError()
+    }
+
+    @Test fun taildropChooseMatchesHelperRules() {
+        assertTrue(choosableTaildropPath("/storage/emulated/0/Download/Taildrop"))
+        assertFalse(choosableTaildropPath("/storage/emulated/0"))
+        assertFalse(choosableTaildropPath("/sdcard"))
+        assertFalse(choosableTaildropPath("/storage/emulated/0/Android/data/x"))
+        assertFalse(choosableTaildropPath("/storage/emulated/0/Android/obb"))
+        assertTrue(choosableTaildropPath("/storage/emulated/0/Android/media/x"))
+    }
+
+    @Test fun languageTagsNormalize() {
+        assertEquals("system", Language.normalize(""))
+        assertEquals("zh-TW", Language.normalize("zh-Hant-HK"))
+        assertEquals("zh-TW", Language.normalize("zh-HK"))
+        assertEquals("zh-CN", Language.normalize("zh-Hans-CN"))
+        assertEquals("en", Language.normalize("en-GB"))
+        assertEquals("system", Language.normalize("fr-FR"))
     }
 }

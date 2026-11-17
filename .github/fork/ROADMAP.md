@@ -79,7 +79,7 @@ Shipping the static `GOOS=linux` binary as its own module variant would need all
   - The fork installer front end (`fork-customize.sh`, used by every fork ZIP) runs upstream's checks first.
   - It then installs the bundled APK with `pm install -r -S <size> < apk`. Streaming it over stdin avoids SELinux file-context problems.
   - If the user already has a differently signed copy, the installer reports it but does not fail the module install.
-  - A build-time patch adds `pm uninstall` to `uninstall.sh`.
+  - A hook at the top of `uninstall.sh` waits for boot to finish, then runs `pm uninstall`. The app also offers self-removal once the module is gone.
 - **WebUI:** keep it until the app reaches feature parity, then drop `webroot/` from fork packages at build time. KernelSU users without the app keep a working UI throughout.
 
 ### Screens (parity with today's WebUI)

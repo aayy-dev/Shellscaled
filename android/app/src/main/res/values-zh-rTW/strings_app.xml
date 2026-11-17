@@ -15,4 +15,5 @@
     <string name="devices_exit_option" formatted="false">可作為出口節點</string>
     <string name="tile_label" formatted="false">Tailscale</string>
     <string name="tile_unavailable" formatted="false">開啟 Shellscaled</string>
+    <string name="access_uninstall_app" formatted="false">解除安裝此應用程式</string>
 </resources>

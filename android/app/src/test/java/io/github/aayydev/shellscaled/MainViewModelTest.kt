@@ -131,4 +131,111 @@ class MainViewModelTest {
         assertEquals(before, runner.requests.size)
         assertNotNull(vm.state.value.commandError)
     }
+
+    @Test fun ipv6SwitchFollowsTheSavedPreferenceNotTheRoute() = runTest(dispatcher) {
+        // Preference on, but no ::/0 route right now (e.g. exit node offline): still shown on,
+        // with the WebUI's bypass warning; toggling sends false.
+        runner.responses["status"] = { 0 to FakeRunner.status(exitNode = "n1", ipv6Takeover = true, ipv6Routed = false) }
+        ready()
+        val status = vm.state.value.status!!
+        assertTrue(status.exitNodeIPv6Takeover)
+        val line = io.github.aayydev.shellscaled.ui.ipv6Line(status, status.exitNodeIPv6Takeover)!!
+        assertEquals(io.github.aayydev.shellscaled.ui.UiText.Res(R.string.w_network_ipv6Bypass), line.first)
+        runner.responses["exit-node-ipv6"] = { 0 to FakeRunner.status(exitNode = "n1", ipv6Takeover = false, ipv6Routed = false) }
+        vm.setExitNodeIPv6(false)
+        assertEquals(false, vm.state.value.exitIpv6Pending)
+        advanceUntilIdle()
+        assertEquals("false", runner.requests.last()["exitNodeIPv6"].toString())
+        assertNull(vm.state.value.exitIpv6Pending)
+        assertFalse(vm.state.value.status!!.exitNodeIPv6Takeover)
+    }
+
+    @Test fun failedCommandShowsOutputAndRefreshesStatus() = runTest(dispatcher) {
+        ready()
+        runner.responses["command"] = { 1 to """{"ok":false,"exitCode":2,"stdout":"partial","stderr":"no reply","settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"advertiseExitNode":false}""" }
+        val before = runner.requests.count { it["action"]!!.jsonPrimitive.content == "status" }
+        vm.runCommand("tailscale ping synthetic-laptop")
+        advanceUntilIdle()
+        val result = vm.state.value.commandResult!!
+        assertEquals(2, result.exitCode)
+        assertEquals("no reply", result.stderr)
+        assertEquals(before + 1, runner.requests.count { it["action"]!!.jsonPrimitive.content == "status" })
+    }
+
+    @Test fun taildropBrowseUsesTheHelpersNormalizedPath() = runTest(dispatcher) {
+        ready()
+        runner.responses["taildrop-list"] = { 0 to """{"ok":true,"taildropPath":"/storage/emulated/0/Download","taildropDirectories":[{"name":"Taildrop","path":"/storage/emulated/0/Download/Taildrop"}],"settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"exitCode":0,"advertiseExitNode":false}""" }
+        vm.taildropBrowse("/sdcard/Download")
+        advanceUntilIdle()
+        assertEquals("/storage/emulated/0/Download", vm.state.value.taildropBrowse)
+        assertEquals(1, vm.state.value.taildropDirs!!.size)
+    }
+
+    @Test fun signInFailureOffersTheFreshLink() = runTest(dispatcher) {
+        runner.responses["status"] = { 0 to FakeRunner.status(state = "NeedsLogin") }
+        ready()
+        assertNull(vm.state.value.status!!.loginUrl)
+        runner.responses["login"] = { 1 to """{"ok":false,"error":"no browser","settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"exitCode":0,"advertiseExitNode":false}""" }
+        // The helper created the link while failing to open it.
+        runner.responses["status"] = { 0 to FakeRunner.status(state = "NeedsLogin", loginUrl = "https://login.tailscale.com/a/synthetic") }
+        vm.login()
+        advanceUntilIdle()
+        assertEquals("https://login.tailscale.com/a/synthetic", vm.state.value.qrUrl)
+    }
+
+    @Test fun networkChangesWaitForConfirmedSettings() = runTest(dispatcher) {
+        runner.responses["status"] = { 127 to "" }
+        vm.checkAccess()
+        advanceUntilIdle()
+        val before = runner.requests.size
+        vm.setExitNode("n1")
+        vm.setMagicDns(true)
+        vm.saveAdvertise("192.168.1.0/24", false)
+        advanceUntilIdle()
+        assertEquals(before, runner.requests.size)
+    }
+
+    @Test fun defaultRoutesAndOverlongInputAreNotSubnetRoutes() = runTest(dispatcher) {
+        ready()
+        val before = runner.requests.size
+        vm.saveAdvertise("0.0.0.0/0", false)
+        vm.saveAdvertise("::/0", false)
+        vm.saveAdvertise("10.0.0.0/8," + " ".repeat(1100), false)
+        advanceUntilIdle()
+        assertEquals(before, runner.requests.size)
+    }
+
+    @Test fun binaryUpdateNeedsACheckedSupportedUpdateForTheChannel() = runTest(dispatcher) {
+        ready()
+        runner.responses["binary-check"] = { 0 to """{"ok":true,"binary":{"currentVersion":"1.104.6","latestVersion":"1.104.7","updateAvailable":true,"checked":true,"supported":false,"channel":"stable"},"settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"exitCode":0,"advertiseExitNode":false}""" }
+        vm.binaryCheck()
+        advanceUntilIdle()
+        vm.binaryUpdate()
+        advanceUntilIdle()
+        assertTrue(runner.requests.none { it["action"]!!.jsonPrimitive.content == "binary-update" })
+    }
+
+    @Test fun channelChangeClearsAnEarlierCheck() = runTest(dispatcher) {
+        ready()
+        runner.responses["binary-check"] = { 0 to """{"ok":true,"binary":{"currentVersion":"1.104.6","latestVersion":"1.104.7","updateAvailable":true,"checked":true,"supported":true,"channel":"stable"},"settings":{},"daemonRunning":true,"exitNodeConfigured":false,"exitNodeIPv6Takeover":false,"magicDNSEnabled":false,"exitCode":0,"advertiseExitNode":false}""" }
+        vm.binaryCheck()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.binaryUpdateAvailable())
+        runner.responses["status"] = { 0 to FakeRunner.status(channel = "preview") }
+        vm.refresh()
+        advanceUntilIdle()
+        assertNull(vm.state.value.binary)
+    }
+
+    @Test fun inconclusiveRecheckKeepsAWorkingUi() = runTest(dispatcher) {
+        ready()
+        runner.probeFails = true
+        vm.checkAccess()
+        advanceUntilIdle()
+        assertEquals(Access.READY, vm.state.value.access)
+        val fresh = MainViewModel(HelperClient(runner) { "en" })
+        fresh.checkAccess()
+        advanceUntilIdle()
+        assertEquals(Access.UNAVAILABLE, fresh.state.value.access)
+    }
 }

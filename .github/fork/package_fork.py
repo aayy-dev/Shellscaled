@@ -14,7 +14,7 @@ arch/<arch>/, upstream's customize.sh under arch/customize.sh, and the fork fron
 single-ABI tree and sources upstream's unchanged installer, so its SHA256SUMS and
 architecture checks still run; then it installs the bundled app.
 
-With --apk, each ABI tree also gets app/Shellscaled.apk, an app-removal line appended to
+With --apk, each ABI tree also gets app/Shellscaled.apk, an app-removal hook at the top of
 uninstall.sh, and a regenerated SHA256SUMS (same rules as upstream build.py) so the APK
 is integrity-checked too. The final per-ABI trees are written to
 <src>/.work/fork-package/<arch>/ for test-package.sh.
@@ -28,9 +28,19 @@ import zipfile
 PER_ARCH = ("module.prop", "build-info.json", "SHA256SUMS", "bin/tailscaled", "bin/shellscaled-web")
 APP_PATH = "app/Shellscaled.apk"
 APP_ID = "io.github.aayydev.shellscaled"
+# Root managers run uninstall.sh early in boot, before Android's package manager exists, so the
+# hook waits in the background (at most 10 minutes) for boot to finish. It sits at the top so that
+# upstream's early exits cannot skip it, and it only ever removes this module's own app.
 UNINSTALL_HOOK = (
-    "\n# Fork: remove the companion app installed with this module (no-op if absent).\n"
-    f"/system/bin/pm uninstall {APP_ID} >/dev/null 2>&1 || true\n"
+    "# Fork: remove the companion app once the package manager is running (no-op if absent).\n"
+    "(\n"
+    "    sc_fork_wait=0\n"
+    "    while [ \"$(/system/bin/getprop sys.boot_completed)\" != 1 ] && [ \"$sc_fork_wait\" -lt 600 ]; do\n"
+    "        sleep 1\n"
+    "        sc_fork_wait=$((sc_fork_wait + 1))\n"
+    "    done\n"
+    f"    /system/bin/pm uninstall {APP_ID}\n"
+    ") </dev/null >/dev/null 2>&1 &\n"
 )
 HERE = Path(__file__).resolve().parent
 
@@ -54,7 +64,10 @@ def with_app(tree, apk):
     tree[APP_PATH] = apk
     uninstall = tree["uninstall.sh"].decode()
     if UNINSTALL_HOOK not in uninstall:
-        tree["uninstall.sh"] = (uninstall.rstrip("\n") + "\n" + UNINSTALL_HOOK).encode()
+        shebang, newline, rest = uninstall.partition("\n")
+        if not shebang.startswith("#!"):
+            raise SystemExit("Upstream uninstall.sh has no shebang line")
+        tree["uninstall.sh"] = (shebang + newline + UNINSTALL_HOOK + rest).encode()
     tree["SHA256SUMS"] = sha256sums(tree)
     return tree
 
@@ -107,6 +120,9 @@ def main():
             raise SystemExit(f"{arch} was built from a different source/version than {base}")
     if "customize.sh" not in shared:
         raise SystemExit("Upstream customize.sh is missing")
+    # The installer front end creates bin/ itself; keep the assumption explicit anyway.
+    if not any(name.startswith("bin/") for name in trees[base]):
+        raise SystemExit("Upstream package has no bin/ directory")
 
     # Final single-ABI trees, exactly as they must look after installation.
     for arch, tree in trees.items():

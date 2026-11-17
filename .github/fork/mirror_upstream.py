@@ -10,7 +10,8 @@ Subcommands:
   plan            decide which upstream release tags still need a fork release
   prepare-source  install upstream's verified arm64 CLI core and pin the Tailscale source
   notes           write the release title/body derived from the upstream release
-  compare         report whether the rebuilt arm64 ZIP is byte-identical to upstream's
+  compare         report how each asset compares with upstream's
+  publish         publish a release draft-first: never leaves a tag without a complete release
 """
 import argparse
 import hashlib
@@ -22,10 +23,13 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 API = "https://api.github.com"
 TAG = re.compile(r"v([0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6})-r([0-9]{1,2})\Z")
+MAX_PER_RUN = 5
+STAGING = "fork-staging/"
 ARCHES = ("arm64", "arm")
 
 
@@ -34,27 +38,33 @@ def fail(message):
     raise SystemExit(1)
 
 
-def api(path, allow_404=False):
+def api(path, allow_404=False, method="GET", body=None, data=None, base=API, content_type=None):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "Shellscaled-fork-mirror",
                "X-GitHub-Api-Version": "2022-11-28"}
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = "Bearer " + token
-    request = urllib.request.Request(API + path, headers=headers)
+    if body is not None:
+        data = json.dumps(body).encode()
+        content_type = "application/json"
+    if content_type:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(base + path, headers=headers, data=data, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read())
+        with urllib.request.urlopen(request, timeout=300) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
         if allow_404 and error.code == 404:
             return None
-        fail(f"GitHub API {path} returned HTTP {error.code}")
+        fail(f"GitHub API {method} {path.split('?')[0]} returned HTTP {error.code}")
 
 
-def releases(repo, pages=5):
+def releases(repo, pages=5, drafts=False):
     result = []
     for page in range(1, pages + 1):
         batch = api(f"/repos/{repo}/releases?per_page=100&page={page}")
-        result += [item for item in batch if not item.get("draft")]
+        result += [item for item in batch if drafts or not item.get("draft")]
         if len(batch) < 100:
             break
     return result
@@ -66,7 +76,7 @@ def outputs(**values):
         with open(destination, "a", encoding="utf-8") as file:
             for key, value in values.items():
                 text = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
-                if "\n" in text:
+                if "\n" in text or "\r" in text:
                     fail("Multi-line workflow output")
                 file.write(f"{key}={text}\n")
     print(json.dumps(values, indent=2))
@@ -98,8 +108,11 @@ def plan(args):
     else:
         done = [item["published_at"] for item in upstream if item["tag_name"] in mirrored]
         if done:
-            cutoff = max(done)
-            wanted = [item for item in upstream if item["tag_name"] not in mirrored and item["published_at"] > cutoff]
+            # Every missing release since the first one mirrored, so a release that failed
+            # (even if a newer one succeeded) is retried on the next run.
+            start = min(done)
+            wanted = [item for item in upstream if item["tag_name"] not in mirrored and item["published_at"] >= start]
+            wanted = wanted[:MAX_PER_RUN]
         else:
             # First run: start from upstream's newest release instead of rebuilding history.
             wanted = [upstream[-1]]
@@ -177,6 +190,69 @@ def compare(args):
     summary("\n".join(lines) + "\n")
 
 
+def version_code(args):
+    """Module versionCode for a tag, with upstream build.py's formula (the app uses the same)."""
+    match = TAG.fullmatch(args.tag)
+    if not match:
+        fail("Unexpected upstream tag format")
+    major, minor, patch = map(int, match[1].split("."))
+    revision = int(match[2])
+    if minor >= 1000 or patch >= 1000:
+        fail("Version exceeds versionCode encoding")
+    code = major * 100_000_000 + minor * 100_000 + patch * 100 + revision
+    outputs(code=str(code), name=f"{match[1]}-r{revision}", version=match[1], revision=str(revision))
+
+
+def publish(args):
+    """Draft-first publication. The old release (if replacing) is deleted only after the new
+    draft holds every asset with a verified digest; leftovers of interrupted runs are removed."""
+    repo, tag = args.repo, args.tag
+    if not TAG.fullmatch(tag) or not re.fullmatch(r"[0-9a-f]{40}", args.commit):
+        fail("Invalid tag or commit")
+    files = sorted(p for p in Path(args.dist).iterdir() if p.is_file())
+    if not files:
+        fail("Nothing to publish")
+    every = releases(repo, drafts=True)
+    staging_prefix = f"{STAGING}{tag}/"
+    for item in every:
+        if item.get("draft") and (item["tag_name"] == tag or item["tag_name"].startswith(staging_prefix)):
+            api(f"/repos/{repo}/releases/{item['id']}", method="DELETE")
+            print(f"Removed an incomplete draft for {tag} from an earlier run")
+    existing = [item for item in every if not item.get("draft") and item["tag_name"] == tag]
+    if existing and not args.rebuild:
+        summary(f"{tag} is already published; nothing to do.")
+        return
+    staging_tag = f"{staging_prefix}{os.environ.get('GITHUB_RUN_ID', 'local')}" if existing else tag
+    draft = api(f"/repos/{repo}/releases", method="POST", body={
+        "tag_name": staging_tag, "target_commitish": args.commit, "name": args.title,
+        "body": Path(args.notes).read_text(encoding="utf-8"), "draft": True, "prerelease": args.prerelease,
+    })
+    try:
+        for path in files:
+            name = urllib.parse.quote(path.name)
+            api(f"/repos/{repo}/releases/{draft['id']}/assets?name={name}", method="POST",
+                data=path.read_bytes(), base="https://uploads.github.com", content_type="application/octet-stream")
+        uploaded = {a["name"]: a for a in api(f"/repos/{repo}/releases/{draft['id']}")["assets"]}
+        if set(uploaded) != {p.name for p in files}:
+            fail("Uploaded asset set differs from the build")
+        for path in files:
+            asset = uploaded[path.name]
+            digest = asset.get("digest")
+            if asset.get("size") != path.stat().st_size or (digest and digest != "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()):
+                fail(f"Uploaded {path.name} does not match the build")
+        for item in existing:
+            api(f"/repos/{repo}/releases/{item['id']}", method="DELETE")
+        latest = "false" if args.prerelease else ("true" if args.latest else "false")
+        api(f"/repos/{repo}/releases/{draft['id']}", method="PATCH", body={
+            "tag_name": tag, "draft": False, "prerelease": args.prerelease, "make_latest": latest,
+        })
+    except BaseException:
+        api(f"/repos/{repo}/releases/{draft['id']}", method="DELETE", allow_404=True)
+        raise
+    url = api(f"/repos/{repo}/releases/tags/{tag}")["html_url"]
+    summary(f"Published {url}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -197,8 +273,21 @@ def main():
     p.add_argument("--upstream", required=True)
     p.add_argument("--tag", required=True)
     p.add_argument("--dist", required=True)
+    p = sub.add_parser("version-code")
+    p.add_argument("--tag", required=True)
+    p = sub.add_parser("publish")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--tag", required=True)
+    p.add_argument("--commit", required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--notes", required=True)
+    p.add_argument("--dist", required=True)
+    p.add_argument("--prerelease", action="store_true")
+    p.add_argument("--latest", action="store_true")
+    p.add_argument("--rebuild", action="store_true")
     args = parser.parse_args()
-    {"plan": plan, "prepare-source": prepare_source, "notes": notes, "compare": compare}[args.command](args)
+    {"plan": plan, "prepare-source": prepare_source, "notes": notes, "compare": compare,
+     "version-code": version_code, "publish": publish}[args.command](args)
 
 
 if __name__ == "__main__":

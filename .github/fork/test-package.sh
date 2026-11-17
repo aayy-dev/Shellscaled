@@ -12,18 +12,26 @@ expected=$src/.work/fork-package
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 command -v sha256sum >/dev/null 2>&1 || sha256sum() { shasum -a 256 "$@"; }
-cat > "$root/pm" <<'EOF'
+fail() { echo "FAIL: $*"; exit 1; }
+
+# Stub for `pm install`. Records the arguments and, for -S, how many bytes were streamed.
+# PM_MODE: ok (default) | fail-stream (stdin install fails, file install works) | fail (both fail)
+cat > "$root/pm" <<'STUB'
 #!/bin/sh
-# Records the install and consumes the streamed APK like `pm install -S`.
-echo "$*" >> "$PM_LOG"
-cat > /dev/null
-echo Success
-EOF
+if [ "$3" = -S ]; then
+    echo "stream $4 $(wc -c | tr -d ' ')" >> "$PM_LOG"
+    if [ "${PM_MODE:-ok}" = ok ]; then echo Success; else echo 'Failure [INSTALL_FAILED_ABORTED]'; fi
+else
+    echo "file $(wc -c < "$3" | tr -d ' ')" >> "$PM_LOG"
+    if [ "${PM_MODE:-ok}" = fail ]; then echo 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]'; else echo Success; fi
+fi
+STUB
 chmod +x "$root/pm"
+mkdir "$root/tmp"
 
 install_for() ( # <abi> <dir>
     MODPATH=$2 KSU=true BOOTMODE=true APATCH='' MAGISK_VER_CODE=''
-    SC_FORK_PM=$root/pm PM_LOG=$2.pm
+    SC_FORK_PM=$root/pm SC_FORK_TMPDIR=$root/tmp PM_LOG=$2.pm
     export PM_LOG
     sc_test_abi=$1
     abort() { printf '%s\n' "$*" >&2; exit 1; }
@@ -45,44 +53,69 @@ for case in "$@"; do
     dir=$root/$abi
     mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
     if [ "$accepted" = false ]; then
-        if install_for "$abi" "$dir" > "$dir.log" 2>&1; then cat "$dir.log"; echo "FAIL: $abi accepted"; exit 1; fi
-        grep -Eq 'Unsupported device architecture|built for a different architecture' "$dir.log"
+        if install_for "$abi" "$dir" > "$dir.log" 2>&1; then cat "$dir.log"; fail "$abi accepted"; fi
+        grep -Eq 'Unsupported device architecture|built for a different architecture' "$dir.log" ||
+            { cat "$dir.log"; fail "$abi rejected for another reason"; }
         echo "PASS: $abi rejected"
         continue
     fi
     [ -n "$first" ] || first=$abi:$arch
-    install_for "$abi" "$dir" > "$dir.log" 2>&1 || { cat "$dir.log"; echo "FAIL: $abi install"; exit 1; }
-    grep -q 'Offline payload and architecture verified' "$dir.log"
-    [ ! -e "$dir/arch" ] || { echo "FAIL: $abi left arch/ behind"; exit 1; }
-    grep -qx "architecture=$arch" "$dir/module.prop"
+    install_for "$abi" "$dir" > "$dir.log" 2>&1 || { cat "$dir.log"; fail "$abi install"; }
+    grep -q 'Offline payload and architecture verified' "$dir.log" || fail "$abi upstream checks did not run"
+    [ ! -e "$dir/arch" ] || fail "$abi left arch/ behind"
+    grep -qx "architecture=$arch" "$dir/module.prop" || fail "$abi module.prop architecture"
     # The installed tree must equal the expected single-ABI tree exactly.
     (cd "$expected/$arch" && find . -type f | sort) > "$root/want"
     (cd "$dir" && find . -type f ! -name .sc-upgrade ! -name skip_mount | sort) > "$root/got"
-    cmp -s "$root/want" "$root/got" || { diff "$root/want" "$root/got"; echo "FAIL: $abi file set"; exit 1; }
-    (cd "$expected/$arch" && find . -type f) | while read -r f; do
-        cmp -s "$expected/$arch/$f" "$dir/$f" || { echo "FAIL: $abi $f differs"; exit 1; }
-    done
+    cmp -s "$root/want" "$root/got" || { diff "$root/want" "$root/got"; fail "$abi file set"; }
+    while read -r f; do
+        cmp -s "$expected/$arch/$f" "$dir/$f" || fail "$abi $f differs"
+    done < "$root/want"
     if [ -f "$dir/app/Shellscaled.apk" ]; then
-        grep -q -- '-r -S' "$dir.pm" || { echo "FAIL: $abi app not installed"; exit 1; }
-        grep -q 'Shellscaled app installed' "$dir.log"
-        grep -q 'pm uninstall io.github.aayydev.shellscaled' "$dir/uninstall.sh"
+        size=$(wc -c < "$dir/app/Shellscaled.apk" | tr -d ' ')
+        grep -qx "stream $size $size" "$dir.pm" || fail "$abi app was not streamed whole to pm"
+        grep -q 'Shellscaled app installed' "$dir.log" || fail "$abi install message"
+        # The removal hook must run before anything in upstream's uninstall.sh could exit.
+        sed -n 2p "$dir/uninstall.sh" | grep -q '^# Fork: remove the companion app' || fail "$abi uninstall hook not first"
+        grep -q 'pm uninstall io.github.aayydev.shellscaled$' "$dir/uninstall.sh" || fail "$abi uninstall hook"
+        sh -n "$dir/uninstall.sh" || fail "$abi uninstall.sh syntax"
         echo "PASS: $abi -> $arch (app installed)"
     else
         echo "PASS: $abi -> $arch"
     fi
 done
+[ -n "$first" ] || fail 'no accepted ABI given'
 
 # A tampered payload must fail upstream's checksum verification.
 abi=${first%%:*}
-dir=$root/tampered && mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
 arch=${first#*:}
+dir=$root/tampered && mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
 printf 'tampered\n' >> "$dir/arch/$arch/bin/tailscaled"
-if install_for "$abi" "$dir" > "$dir.log" 2>&1; then echo 'FAIL: tampered payload accepted'; exit 1; fi
-grep -q 'checksum verification failed' "$dir.log" && echo 'PASS: tampered binary rejected'
-if [ -f "$dir/app/Shellscaled.apk" ]; then
+if install_for "$abi" "$dir" > "$dir.log" 2>&1; then fail 'tampered payload accepted'; fi
+grep -q 'checksum verification failed' "$dir.log" || { cat "$dir.log"; fail 'tampered binary rejected for another reason'; }
+echo 'PASS: tampered binary rejected'
+
+if unzip -l "$zip" app/Shellscaled.apk >/dev/null 2>&1; then
     dir=$root/tampered-app && mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
     printf 'tampered\n' >> "$dir/app/Shellscaled.apk"
-    if install_for "$abi" "$dir" > "$dir.log" 2>&1; then echo 'FAIL: tampered app accepted'; exit 1; fi
-    grep -q 'checksum verification failed' "$dir.log" && echo 'PASS: tampered app rejected'
-    [ ! -s "$dir.pm" ] || { echo 'FAIL: tampered app reached pm'; exit 1; }
+    if install_for "$abi" "$dir" > "$dir.log" 2>&1; then fail 'tampered app accepted'; fi
+    grep -q 'checksum verification failed' "$dir.log" || { cat "$dir.log"; fail 'tampered app rejected for another reason'; }
+    [ ! -s "$dir.pm" ] || fail 'tampered app reached pm'
+    echo 'PASS: tampered app rejected before pm'
+
+    # If streaming over stdin fails, a shell-readable copy is installed, then removed.
+    dir=$root/fallback && mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
+    PM_MODE=fail-stream install_for "$abi" "$dir" > "$dir.log" 2>&1 || { cat "$dir.log"; fail 'fallback install'; }
+    size=$(wc -c < "$dir/app/Shellscaled.apk" | tr -d ' ')
+    grep -qx "file $size" "$dir.pm" || fail 'fallback did not install the whole APK'
+    grep -q 'Shellscaled app installed' "$dir.log" || fail 'fallback message'
+    [ -z "$(ls "$root/tmp")" ] || fail 'fallback copy left behind'
+    echo 'PASS: pm stdin failure falls back to a file install'
+
+    # If pm refuses the app (for example, a differently signed copy), the module still installs.
+    dir=$root/refused && mkdir -p "$dir" && unzip -q "$zip" -d "$dir"
+    PM_MODE=fail install_for "$abi" "$dir" > "$dir.log" 2>&1 || { cat "$dir.log"; fail 'module install failed when pm refused the app'; }
+    grep -q 'could not be installed automatically' "$dir.log" || fail 'refusal message'
+    grep -q 'Offline payload and architecture verified' "$dir.log" || fail 'refused app skipped module checks'
+    echo 'PASS: pm refusal keeps the module install'
 fi

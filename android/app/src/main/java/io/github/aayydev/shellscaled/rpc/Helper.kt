@@ -18,9 +18,14 @@ data class RunResult(val code: Int, val stdout: String)
 
 /** Executes one fixed command line in a root shell. */
 interface RootRunner {
-    /** Null when the app has no root shell (not granted, or no root manager). */
+    /** False when the app has no root shell (not granted, or no root manager). */
     suspend fun hasRoot(): Boolean
-    suspend fun run(command: String, timeoutMs: Long): RunResult
+
+    /**
+     * Runs [command]. Quick calls share one persistent shell; [isolated] calls get their own
+     * short-lived shell so a long operation (an update, a command) never blocks status polling.
+     */
+    suspend fun run(command: String, timeoutMs: Long, isolated: Boolean = false): RunResult
 }
 
 /** A failure with a message for the user: either the helper's localized text, or a client key. */
@@ -28,7 +33,7 @@ class HelperException(val helperMessage: String?, val clientKey: ClientError? = 
 
 enum class ClientError { ENCODE, TIMEOUT, RESPONSE, UNAVAILABLE, UNEXPECTED_EXIT, NO_ROOT }
 
-enum class Access { CHECKING, NO_ROOT, MODULE_MISSING, READY }
+enum class Access { CHECKING, NO_ROOT, MODULE_MISSING, UNAVAILABLE, READY }
 
 /**
  * Same RPC protocol the KernelSU WebUI uses: one JSON request, base64 encoded, passed as a
@@ -37,13 +42,30 @@ enum class Access { CHECKING, NO_ROOT, MODULE_MISSING, READY }
 class HelperClient(private val runner: RootRunner, private val locale: () -> String) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun access(): Access {
+    /** Null when the check itself could not finish (for example, the root shell timed out). */
+    suspend fun access(): Access? {
         if (!runner.hasRoot()) return Access.NO_ROOT
-        val probe = runCatching { runner.run("test -x ${ModulePaths.HELPER}", 15_000) }.getOrNull()
-        return if (probe?.code == 0) Access.READY else Access.MODULE_MISSING
+        val probe = try {
+            runner.run("test -x ${ModulePaths.HELPER}", 15_000, isolated = true)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (e is kotlinx.coroutines.TimeoutCancellationException) return null
+            throw e
+        } catch (_: Exception) {
+            return null
+        }
+        return if (probe.code == 0) Access.READY else Access.MODULE_MISSING
     }
 
-    suspend fun call(action: String, fields: Map<String, JsonElement> = emptyMap(), timeoutMs: Long = DEFAULT_TIMEOUT): Reply {
+    /**
+     * Sends one request. With [acceptFailure], an `ok:false` reply is returned instead of thrown,
+     * for actions such as `command` whose failures still carry output for the user.
+     */
+    suspend fun call(
+        action: String,
+        fields: Map<String, JsonElement> = emptyMap(),
+        timeoutMs: Long = DEFAULT_TIMEOUT,
+        acceptFailure: Boolean = false,
+    ): Reply {
         val request = buildJsonObject {
             put("action", JsonPrimitive(action))
             put("locale", JsonPrimitive(locale()))
@@ -53,7 +75,7 @@ class HelperClient(private val runner: RootRunner, private val locale: () -> Str
         if (encoded.length > MAX_REQUEST || !BASE64.matches(encoded)) throw HelperException(null, ClientError.ENCODE)
         if (!runner.hasRoot()) throw HelperException(null, ClientError.NO_ROOT)
         val result = try {
-            runner.run("${ModulePaths.HELPER} rpc $encoded", timeoutMs)
+            runner.run("${ModulePaths.HELPER} rpc $encoded", timeoutMs, isolated = action in ISOLATED)
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
             throw HelperException(null, ClientError.TIMEOUT)
         }
@@ -63,6 +85,7 @@ class HelperClient(private val runner: RootRunner, private val locale: () -> Str
         val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
             ?: throw HelperException(null, ClientError.RESPONSE)
         val reply = Reply(obj)
+        if (!reply.ok && acceptFailure) return reply
         if (!reply.ok) throw HelperException(reply.error ?: "", if (reply.error.isNullOrBlank()) ClientError.UNEXPECTED_EXIT else null)
         if (result.code != 0) throw HelperException(null, ClientError.UNEXPECTED_EXIT)
         return reply
@@ -74,6 +97,9 @@ class HelperClient(private val runner: RootRunner, private val locale: () -> Str
         private const val MAX_REQUEST = 8192
         private const val MAX_RESPONSE = 1_500_000
         private val BASE64 = Regex("^[A-Za-z0-9+/]+={0,2}$")
+
+        /** Slow or user-initiated actions that must not hold the shared shell. */
+        val ISOLATED = setOf("up", "down", "login", "console", "about", "binary-check", "binary-update", "command", "taildrop-receive")
     }
 }
 

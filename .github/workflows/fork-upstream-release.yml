@@ -2,13 +2,20 @@
 # commits (including changes to its own module-release.yml) cannot break it.
 #
 # Every hour (or on demand) this workflow:
-#   1. finds upstream releases (KyuubiRan/Shellscaled) that the fork has not mirrored yet,
-#   2. merges upstream main into the fork's main,
-#   3. checks out each upstream release tag, builds arm64, arm (32-bit) and amd64 (x86_64)
-#      packages with upstream's own scripts/build.py, builds and signs the Shellscaled app,
-#      bundles it into every ZIP plus one universal ZIP, and
-#   4. publishes a fork release with the same tag, title, channel and asset naming.
-name: Mirror upstream release (arm64 + arm + x86_64 + universal)
+#   1. plan:    finds upstream releases (KyuubiRan/Shellscaled) the fork has not mirrored yet,
+#   2. sync:    merges upstream main into the fork's default branch,
+#   3. build:   checks out each upstream release tag and builds arm64, arm (32-bit) and amd64
+#               (x86_64) packages with upstream's own scripts/build.py,
+#   4. app:     builds, tests and signs the Shellscaled app from fork code only,
+#   5. package: bundles the app into every ZIP, adds a universal ZIP, and tests the installers,
+#   6. publish: pushes the upstream tag and publishes a release with upstream's tag, title,
+#               channel and asset naming.
+#
+# Trust boundaries: upstream code (build.py, ci-release.py, the installer under test) runs only
+# in jobs with a read-only token and no secrets. The signing key lives in the app-signing
+# environment and is visible only to the app job, which never checks out upstream code. The
+# PAT is used only to push git refs. Artifacts carry data between jobs, never secrets.
+name: Mirror upstream release (arm64 + arm + x86_64 + universal + app)
 
 on:
   schedule:
@@ -30,13 +37,14 @@ on:
         type: boolean
         default: true
 
+# Scheduled runs share one queue (a newer pending one replaces an older one); manual runs are
+# never dropped. Publication is additionally serialized per tag below.
 concurrency:
-  group: fork-upstream-release
+  group: fork-upstream-release-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'scheduled' }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 env:
   UPSTREAM_REPO: KyuubiRan/Shellscaled
@@ -47,6 +55,9 @@ jobs:
     if: github.repository != 'KyuubiRan/Shellscaled'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
@@ -79,41 +90,55 @@ jobs:
     if: needs.plan.outputs.count != '0' || (github.event_name == 'workflow_dispatch' && inputs.sync)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      # A PAT is required: GITHUB_TOKEN cannot push commits that change workflow files.
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Check out the fork's default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           submodules: false
+          # A PAT is required: GITHUB_TOKEN cannot push commits that change workflow files.
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Merge upstream main
         env:
-          BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
+          # Scheduled events carry no repository payload; ask the API for the default branch.
+          branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          [ -n "$branch" ]
+          git checkout -q "$branch"
           read -r login id < <(gh api user --jq '"\(.login) \(.id)"')
           git config user.name "$login"
           git config user.email "${id}+${login}@users.noreply.github.com"
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
           git fetch --no-tags upstream main
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "Fork $BRANCH already contains upstream main $(git rev-parse --short=12 upstream/main)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Fork $branch already contains upstream main $(git rev-parse --short=12 upstream/main)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          before=$(git rev-parse HEAD)
           if ! git merge --no-edit -m "Sync upstream main ($(git rev-parse --short=12 upstream/main))" upstream/main; then
             git merge --abort || true
-            echo "::error::Upstream main conflicts with fork-only commits on $BRANCH; resolve the merge manually."
+            echo "::error::Upstream main conflicts with fork-only commits on $branch; resolve the merge manually."
             exit 1
           fi
-          git push origin "HEAD:$BRANCH"
-          echo "Merged upstream main $(git rev-parse --short=12 upstream/main) into $BRANCH." | tee -a "$GITHUB_STEP_SUMMARY"
+          # A workflow file that upstream adds would run on this push with the fork's secrets.
+          # Require a person to review (and disable) it first.
+          added=$(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows)
+          if [ -n "$added" ]; then
+            echo "::error::Upstream adds workflow files: $added. Review them, disable them in the fork, then merge manually."
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          echo "Merged upstream main $(git rev-parse --short=12 upstream/main) into $branch." | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Keep inherited upstream workflows disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100" \
@@ -126,30 +151,28 @@ jobs:
             fi
           done
 
-  release:
-    needs: [plan, sync]
-    # Releases are built from the upstream tag itself, so they proceed even if the branch merge fails.
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
+  build:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # Runs upstream code: read-only token, no secrets.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ matrix.tag }}
       PRERELEASE: ${{ matrix.prerelease }}
-      LATEST: ${{ matrix.latest }}
       GOTOOLCHAIN: local
     steps:
-      - name: Check out fork automation and the app
+      - name: Check out fork automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: fork
-          sparse-checkout: |
-            .github/fork
-            android
+          sparse-checkout: .github/fork
           persist-credentials: false
 
       - name: Check out the upstream release tag
@@ -158,7 +181,7 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: refs/tags/${{ matrix.tag }}
           path: src
-          fetch-depth: 0
+          fetch-depth: 1
           submodules: false
           persist-credentials: false
 
@@ -212,54 +235,150 @@ jobs:
               assert info['moduleSourceCommit'] == head, arch
               assert info['architecture'] == arch, arch
               assert f'architecture={arch}\n' in Path(f'.work/package/{arch}/module.prop').read_text(), arch
+          Path('.work/release-commit').write_text(head + '\n')
           PY
 
-      - name: Build, test and sign the Shellscaled app
-        working-directory: fork/android
-        env:
-          SHELLSCALED_KEYSTORE_B64: ${{ secrets.SHELLSCALED_KEYSTORE_B64 }}
-          SHELLSCALED_KEYSTORE_PASSWORD: ${{ secrets.SHELLSCALED_KEYSTORE_PASSWORD }}
-          SHELLSCALED_KEY_ALIAS: ${{ secrets.SHELLSCALED_KEY_ALIAS }}
-          SHELLSCALED_KEY_PASSWORD: ${{ secrets.SHELLSCALED_KEY_PASSWORD }}
-          VERSION: ${{ steps.prepare.outputs.version }}
-          REVISION: ${{ steps.prepare.outputs.revision }}
+      - name: Hand the package trees to the packaging job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stages-${{ matrix.tag }}
+          path: |
+            src/.work/package/arm64
+            src/.work/package/arm
+            src/.work/package/amd64
+            src/.work/release-commit
+            src/dist/*.binary.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  app:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The only job that can read the signing key. It checks out fork code only.
+    environment: app-signing
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      TAG: ${{ matrix.tag }}
+    steps:
+      - name: Check out the app and fork automation (no upstream code)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .github/fork
+            android
+          persist-credentials: false
+
+      - name: Install the app's Android SDK platform
         run: |
           set -euo pipefail
-          if [ -z "$SHELLSCALED_KEYSTORE_B64" ]; then
-            echo "::error::Missing SHELLSCALED_KEYSTORE_B64; the app must be signed with the fork's release key."
-            exit 1
-          fi
-          export JAVA_HOME="$JAVA_HOME_21_X64"
           # `yes` dies of SIGPIPE once sdkmanager exits; judge the pipeline by sdkmanager alone.
           set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
           set -o pipefail
           test -f "$ANDROID_HOME/platforms/android-37.2/android.jar"
+
+      - name: Test and lint the app (no signing material)
+        id: version
+        working-directory: android
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          python3 ../.github/fork/mirror_upstream.py version-code --tag "$TAG"
+          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintRelease
+
+      - name: Build and sign the release APK
+        working-directory: android
+        env:
+          SHELLSCALED_KEYSTORE_B64: ${{ secrets.SHELLSCALED_KEYSTORE_B64 }}
+          SHELLSCALED_KEYSTORE_PASSWORD: ${{ secrets.SHELLSCALED_KEYSTORE_PASSWORD }}
+          SHELLSCALED_KEY_ALIAS: ${{ secrets.SHELLSCALED_KEY_ALIAS }}
+          SHELLSCALED_KEY_PASSWORD: ${{ secrets.SHELLSCALED_KEY_PASSWORD }}
+          CODE: ${{ steps.version.outputs.code }}
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SHELLSCALED_KEYSTORE_B64" ]; then
+            echo "::error::Missing SHELLSCALED_KEYSTORE_B64 in the app-signing environment."
+            exit 1
+          fi
+          export JAVA_HOME="$JAVA_HOME_21_X64"
           export SHELLSCALED_KEYSTORE="$RUNNER_TEMP/shellscaled-release.jks"
-          printf '%s' "$SHELLSCALED_KEYSTORE_B64" | base64 -d > "$SHELLSCALED_KEYSTORE"
           trap 'rm -f "$SHELLSCALED_KEYSTORE"' EXIT
-          # The app's versionCode follows the module's, so every release upgrades cleanly.
-          code=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["versionCode"])' ../../src/.work/package/arm64/build-info.json)
-          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintRelease :app:assembleRelease \
-            -PappVersionCode="$code" -PappVersionName="$VERSION-r$REVISION"
+          printf '%s' "$SHELLSCALED_KEYSTORE_B64" | base64 -d > "$SHELLSCALED_KEYSTORE"
+          ./gradlew --no-daemon --console=plain :app:assembleRelease -PappVersionCode="$CODE" -PappVersionName="$NAME"
           apk=app/build/outputs/apk/release/app-release.apk
           signer=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1)
           if [ "$signer" != "$(cat ../.github/fork/app-signing-cert.sha256)" ]; then
             echo "::error::The APK is not signed with the pinned release certificate."
             exit 1
           fi
-          name="Shellscaled-$VERSION-r$REVISION.apk"
-          cp "$apk" "../../src/dist/$name"
-          (cd ../../src/dist && sha256sum "$name" > "$name.sha256")
+          mkdir -p "$RUNNER_TEMP/app"
+          cp "$apk" "$RUNNER_TEMP/app/Shellscaled-$NAME.apk"
+          (cd "$RUNNER_TEMP/app" && sha256sum "Shellscaled-$NAME.apk" > "Shellscaled-$NAME.apk.sha256")
+          printf '%s\n' "$CODE" > "$RUNNER_TEMP/app/version-code"
+
+      - name: Hand the signed APK to the packaging job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-${{ matrix.tag }}
+          path: ${{ runner.temp }}/app
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    needs: [plan, build, app]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Runs upstream's installer in the host test: read-only token, no secrets.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      TAG: ${{ matrix.tag }}
+    steps:
+      - name: Check out fork automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fork
+          sparse-checkout: .github/fork
+          persist-credentials: false
+
+      - name: Fetch the package trees
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stages-${{ matrix.tag }}
+          path: src
+
+      - name: Fetch the signed APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app-${{ matrix.tag }}
+          path: app
 
       - name: Package every ZIP with the app and test the installers
-        env:
-          VERSION: ${{ steps.prepare.outputs.version }}
-          REVISION: ${{ steps.prepare.outputs.revision }}
         run: |
           set -euo pipefail
-          apk="src/dist/Shellscaled-$VERSION-r$REVISION.apk"
-          pkg() { echo "src/dist/Shellscaled-$VERSION-r$REVISION-$1.zip"; }
+          read -r version revision code name < <(python3 fork/.github/fork/mirror_upstream.py version-code --tag "$TAG" |
+            python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["version"], d["revision"], d["code"], d["name"])')
+          # The APK's versionCode must equal every package's module versionCode.
+          test "$(cat app/version-code)" = "$code"
+          for arch in arm64 arm amd64; do
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["versionCode"])' "src/.work/package/$arch/build-info.json")" = "$code"
+          done
+          apk="app/Shellscaled-$name.apk"
+          (cd app && sha256sum -c "Shellscaled-$name.apk.sha256")
+          cp "$apk" "$apk.sha256" src/dist/
+          pkg() { echo "src/dist/Shellscaled-$version-r$revision-$1.zip"; }
           for arch in arm64 arm amd64; do
             python3 fork/.github/fork/package_fork.py --src src --arch "$arch" --apk "$apk"
           done
@@ -268,18 +387,64 @@ jobs:
           sh fork/.github/fork/test-package.sh "$(pkg arm)" src armeabi-v7a:arm -- arm64-v8a x86_64
           sh fork/.github/fork/test-package.sh "$(pkg amd64)" src x86_64:amd64 -- arm64-v8a armeabi-v7a
           sh fork/.github/fork/test-package.sh "$(pkg universal)" src arm64-v8a:arm64 armeabi-v7a:arm x86_64:amd64 -- x86
-          test -z "$(git -C src status --porcelain --untracked-files=all)"
+          cp src/.work/release-commit src/dist/.release-commit
           python3 - <<'PY'
           from pathlib import Path
-          files = sorted(p.name for p in Path('src/dist').iterdir())
+          files = sorted(p.name for p in Path('src/dist').iterdir() if not p.name.startswith('.'))
           assert len(files) == 13, files
           assert len([f for f in files if f.endswith('.zip')]) == 4, files
           assert len([f for f in files if f.endswith('.apk')]) == 1, files
           print('\n'.join(files))
           PY
 
+      - name: Hand the release assets to the publishing job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.tag }}
+          path: src/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [plan, sync, package]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Runs no upstream code; only fork scripts and git ref pushes.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: fork-publish-${{ matrix.tag }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ matrix.tag }}
+      PRERELEASE: ${{ matrix.prerelease }}
+      LATEST: ${{ matrix.latest }}
+    steps:
+      - name: Check out fork automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fork
+          sparse-checkout: .github/fork
+          persist-credentials: false
+
+      - name: Fetch the release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ matrix.tag }}
+          path: dist
+
       - name: Compare with upstream's assets
-        run: python3 fork/.github/fork/mirror_upstream.py compare --upstream "$UPSTREAM_REPO" --tag "$TAG" --dist src/dist
+        run: |
+          set -euo pipefail
+          mv dist/.release-commit release-commit
+          python3 fork/.github/fork/mirror_upstream.py compare --upstream "$UPSTREAM_REPO" --tag "$TAG" --dist dist
 
       - name: Write release notes from the upstream release
         id: notes
@@ -290,55 +455,31 @@ jobs:
           PUSH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
-          commit=$(git -C src rev-parse "refs/tags/$TAG^{commit}")
+          git init -q tagrepo
+          git -C tagrepo fetch -q --no-tags "https://github.com/$UPSTREAM_REPO.git" "+refs/tags/$TAG:refs/tags/$TAG"
+          commit=$(git -C tagrepo rev-parse "refs/tags/$TAG^{commit}")
+          # The packages were built from this exact commit.
+          test "$commit" = "$(cat release-commit)"
           existing=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$TAG^{}" "refs/tags/$TAG" | tail -n 1 | cut -f 1)
           if [ -n "$existing" ]; then
-            fork_commit=$(git -C src rev-parse "$existing^{commit}" 2>/dev/null || echo "$existing")
+            fork_commit=$(git -C tagrepo rev-parse "$existing^{commit}" 2>/dev/null || echo "$existing")
             if [ "$fork_commit" != "$commit" ]; then
               echo "::error::Fork tag $TAG points to $existing, upstream tag points to $commit"
               exit 1
             fi
-            exit 0
+          else
+            git -C tagrepo push -q "https://x-access-token:${PUSH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" "refs/tags/$TAG:refs/tags/$TAG"
           fi
-          git -C src push "https://x-access-token:${PUSH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" "refs/tags/$TAG:refs/tags/$TAG"
+          echo "COMMIT=$commit" >> "$GITHUB_ENV"
 
-      - name: Create the release as a draft and upload both packages
-        id: draft
+      - name: Publish draft-first with upstream's channel and latest flags
         env:
           TITLE: ${{ steps.notes.outputs.title }}
           REBUILD: ${{ inputs.rebuild && 'true' || 'false' }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            if [ "$REBUILD" != true ]; then
-              echo "::error::Fork release $TAG already exists"
-              exit 1
-            fi
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
-          fi
-          extra=()
-          if [ "$PRERELEASE" = true ]; then extra+=(--prerelease); fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "$TITLE" --notes-file notes.md "${extra[@]}"
-          echo 'created=true' >> "$GITHUB_OUTPUT"
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" src/dist/*
-
-      - name: Publish with upstream's channel and latest flags
-        run: |
-          set -euo pipefail
-          if [ "$PRERELEASE" = true ]; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
-          elif [ "$LATEST" = true ]; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
-          else
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest=false
-          fi
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq '"Published " + .url' | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Remove this run's incomplete draft
-        if: failure() && steps.draft.outputs.created == 'true'
-        run: |
-          set -euo pipefail
-          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true ]; then
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
-          fi
+          args=(--repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --title "$TITLE" --notes notes.md --dist dist)
+          if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
+          if [ "$LATEST" = true ]; then args+=(--latest); fi
+          if [ "$REBUILD" = true ]; then args+=(--rebuild); fi
+          python3 fork/.github/fork/mirror_upstream.py publish "${args[@]}"

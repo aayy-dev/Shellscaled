@@ -1,5 +1,7 @@
 package io.github.aayydev.shellscaled.ui
 
+import android.content.Intent
+import androidx.core.net.toUri
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +25,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -40,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
@@ -65,6 +69,7 @@ fun ShellscaledApp(vm: MainViewModel) {
         onStopOrDispose { vm.onBackground() }
     }
     val tv = isTelevision()
+    val context = LocalContext.current
     // Compact phones get a bottom bar; tablets, foldables, desktops and TV get a side rail.
     // Window (not screen) width, so split-screen, freeform and desktop windows lay out correctly.
     val windowWidth = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp() }
@@ -122,7 +127,12 @@ fun ShellscaledApp(vm: MainViewModel) {
                     when (state.access) {
                         Access.CHECKING -> Gate(R.string.access_checking, null, busy = true, onRetry = null)
                         Access.NO_ROOT -> Gate(R.string.access_no_root_title, R.string.access_no_root_body, busy = false) { vm.checkAccess() }
-                        Access.MODULE_MISSING -> Gate(R.string.access_module_title, R.string.access_module_body, busy = false) { vm.checkAccess() }
+                        Access.MODULE_MISSING -> Gate(
+                            R.string.access_module_title, R.string.access_module_body, busy = false,
+                            // Root managers remove modules early in boot, when the app may not be removable yet.
+                            onUninstall = { context.startActivity(Intent(Intent.ACTION_DELETE, "package:${context.packageName}".toUri())) },
+                        ) { vm.checkAccess() }
+                        Access.UNAVAILABLE -> Gate(R.string.w_state_ServiceError_title, R.string.w_error_unavailable, busy = false) { vm.checkAccess() }
                         Access.READY -> when (tab) {
                             Tab.OVERVIEW -> OverviewScreen(state, vm, tv)
                             Tab.DEVICES -> DevicesScreen(state, vm)
@@ -138,7 +148,7 @@ fun ShellscaledApp(vm: MainViewModel) {
 }
 
 @Composable
-private fun Gate(@StringRes title: Int, @StringRes body: Int?, busy: Boolean, onRetry: (() -> Unit)?) {
+private fun Gate(@StringRes title: Int, @StringRes body: Int?, busy: Boolean, onUninstall: (() -> Unit)? = null, onRetry: (() -> Unit)?) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
@@ -148,6 +158,7 @@ private fun Gate(@StringRes title: Int, @StringRes body: Int?, busy: Boolean, on
         Text(stringResource(title), style = MaterialTheme.typography.headlineSmall)
         if (body != null) Text(stringResource(body), style = MaterialTheme.typography.bodyLarge)
         if (onRetry != null) Button(onClick = onRetry, modifier = Modifier.focusRing()) { Text(stringResource(R.string.retry)) }
+        if (onUninstall != null) OutlinedButton(onClick = onUninstall, modifier = Modifier.focusRing()) { Text(stringResource(R.string.access_uninstall_app)) }
     }
 }
 

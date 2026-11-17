@@ -11,6 +11,7 @@ class ShellscaledApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        Language.init(this)
         LibsuRunner.configure()
     }
 }

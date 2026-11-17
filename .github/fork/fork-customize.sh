@@ -14,6 +14,7 @@ esac
 sc_fork_src="$MODPATH/arch/$sc_fork_arch"
 [ -d "$sc_fork_src" ] || abort '! This ZIP was built for a different architecture.'
 [ "$(ls "$MODPATH/arch" | wc -l)" -gt 2 ] && ui_print "- Universal package: installing the $sc_fork_arch payload."
+mkdir -p "$MODPATH/bin" || abort '! Could not stage the payload.'
 for sc_fork_file in module.prop build-info.json SHA256SUMS bin/tailscaled bin/shellscaled-web; do
     [ -f "$sc_fork_src/$sc_fork_file" ] || abort '! Incomplete module payload.'
     mv -f "$sc_fork_src/$sc_fork_file" "$MODPATH/$sc_fork_file" || abort '! Could not stage the payload.'
@@ -29,15 +30,17 @@ sc_fork_apk="$MODPATH/app/Shellscaled.apk"
 if [ -f "$sc_fork_apk" ]; then
     ui_print '- Installing the Shellscaled app.'
     sc_fork_pm=${SC_FORK_PM:-/system/bin/pm} # Overridable only for the host-side package test.
+    # A package verifier prompt or a slow system_server must not hang the manager's installer.
+    sc_fork_limit() { if command -v timeout >/dev/null 2>&1; then timeout 120 "$@"; else "$@"; fi; }
     sc_fork_size=$(wc -c < "$sc_fork_apk" | tr -d ' ')
     # Stream over stdin first (no file-context issues); fall back to a shell-readable copy.
-    sc_fork_out=$("$sc_fork_pm" install -r -S "$sc_fork_size" < "$sc_fork_apk" 2>&1)
+    sc_fork_out=$(sc_fork_limit "$sc_fork_pm" install -r -S "$sc_fork_size" < "$sc_fork_apk" 2>&1)
     case "$sc_fork_out" in
         *Success*) sc_fork_ok=true ;;
         *)
-            sc_fork_tmp=/data/local/tmp/shellscaled-app-$$.apk
+            sc_fork_tmp=${SC_FORK_TMPDIR:-/data/local/tmp}/shellscaled-app-$$.apk
             if cp "$sc_fork_apk" "$sc_fork_tmp" && chmod 0644 "$sc_fork_tmp"; then
-                sc_fork_out=$("$sc_fork_pm" install -r "$sc_fork_tmp" 2>&1)
+                sc_fork_out=$(sc_fork_limit "$sc_fork_pm" install -r "$sc_fork_tmp" 2>&1)
             fi
             rm -f "$sc_fork_tmp"
             case "$sc_fork_out" in *Success*) sc_fork_ok=true ;; *) sc_fork_ok=false ;; esac
@@ -51,5 +54,6 @@ if [ -f "$sc_fork_apk" ]; then
         ui_print '  or uninstall a differently signed copy first.'
     fi
     unset sc_fork_size sc_fork_out sc_fork_tmp sc_fork_ok sc_fork_pm
+    unset -f sc_fork_limit
 fi
 unset sc_fork_apk sc_fork_arch

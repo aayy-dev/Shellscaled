@@ -34,7 +34,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import android.annotation.SuppressLint
 import android.content.ClipData
+import android.os.Build
+import android.os.PersistableBundle
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -81,7 +84,7 @@ fun connectionLabel(status: Status?, busy: String?): Int = when {
 }
 
 @Composable
-fun CopyRow(value: String, label: String? = null) {
+fun CopyRow(value: String, label: String? = null, sensitive: Boolean = false) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     var copied by remember(value) { mutableStateOf(false) }
@@ -92,7 +95,12 @@ fun CopyRow(value: String, label: String? = null) {
         }
         TextButton(
             onClick = {
-                scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(label ?: "Shellscaled", value))) }
+                val clip = ClipData.newPlainText(label ?: "Shellscaled", value)
+                // Keep private values (the sign-in link) out of clipboard previews and keyboard suggestions.
+                if (sensitive && Build.VERSION.SDK_INT >= 24) {
+                    clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
+                }
+                scope.launch { clipboard.setClipEntry(ClipEntry(clip)) }
                 copied = true
             },
             modifier = Modifier.focusRing(),
@@ -192,7 +200,7 @@ private fun LoginCard(state: UiState, vm: MainViewModel) {
     val url = state.status?.loginUrl
     SectionCard(stringResource(R.string.w_login_heading)) {
         Text(stringResource(R.string.w_login_description))
-        if (url != null) CopyRow(url, stringResource(R.string.w_login_url)) else Message(res(R.string.w_login_linkPending), MessageKind.MUTED)
+        if (url != null) CopyRow(url, stringResource(R.string.w_login_url), sensitive = true) else Message(res(R.string.w_login_linkPending), MessageKind.MUTED)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(vm::login, Modifier.focusRing(), enabled = state.busy == null) { Text(stringResource(R.string.w_login_action)) }
             if (url != null) OutlinedButton(vm::showLoginQr, Modifier.focusRing()) { Text(stringResource(R.string.qr_show)) }
@@ -276,7 +284,15 @@ fun formatLastSeen(value: String?): String? {
 
 // ---- Taildrop ---------------------------------------------------------------------------------
 
+// Root-side paths exactly as the helper spells them (helper/main.go), not this app's storage.
 private const val SHARED_ROOT = "/storage/emulated/0"
+@SuppressLint("SdCardPath")
+private val SHARED_ROOTS = setOf(SHARED_ROOT, "/sdcard")
+private val PRIVATE_APP_DIRS = Regex("^/storage/emulated/0/Android/(data|obb|sandbox)(/|$)")
+
+/** Mirrors the helper's validTaildropPath: a subdirectory of shared storage outside app-private folders. */
+fun choosableTaildropPath(path: String): Boolean =
+    path.startsWith("$SHARED_ROOT/") && path !in SHARED_ROOTS && !PRIVATE_APP_DIRS.containsMatchIn(path)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -310,7 +326,7 @@ fun TaildropScreen(state: UiState, vm: MainViewModel) {
                             Text(stringResource(R.string.w_taildrop_up))
                         }
                     }
-                    if (current.isNotBlank()) {
+                    if (choosableTaildropPath(current)) {
                         Button({ vm.taildropChoose(current) }, Modifier.focusRing(), enabled = state.busy == null) {
                             Text(stringResource(if (state.busy == "taildrop-path") R.string.w_taildrop_saving else R.string.w_taildrop_choose))
                         }
@@ -365,9 +381,11 @@ fun CommandScreen(state: UiState, vm: MainViewModel) {
         SectionCard(stringResource(R.string.w_command_result)) {
             val result = state.commandResult
             when {
-                state.commandError != null -> Message(UiText.Joined(res(R.string.w_command_rejected), state.commandError), MessageKind.ERROR)
+                result == null && state.commandError != null -> Message(UiText.Joined(res(R.string.w_command_rejected), state.commandError), MessageKind.ERROR)
                 result == null -> Message(res(R.string.w_command_waiting), MessageKind.MUTED)
                 else -> {
+                    // A command that ran but failed (non-zero exit, timeout) keeps its output.
+                    Message(state.commandError, MessageKind.ERROR)
                     Message(
                         if (result.exitCode == 0) res(R.string.w_command_complete) else res(R.string.w_command_exitCode, "code" to result.exitCode.toString()),
                         if (result.exitCode == 0) MessageKind.INFO else MessageKind.WARNING,
@@ -386,3 +404,6 @@ fun CommandScreen(state: UiState, vm: MainViewModel) {
 }
 
 private const val MAX_OUTPUT = 60_000
+
+/** ClipDescription.EXTRA_IS_SENSITIVE (API 33); older versions ignore the extra. */
+private const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"

@@ -1,9 +1,12 @@
 package io.github.aayydev.shellscaled.ui
 
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.annotation.StringRes
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
+import androidx.core.content.edit
 import androidx.core.os.LocaleListCompat
 import io.github.aayydev.shellscaled.R
 import io.github.aayydev.shellscaled.rpc.ClientError
@@ -43,25 +46,44 @@ fun Throwable.toUiText(): UiText {
     }
 }
 
-/** Per-app language: follows the system unless the user picks one (Android 13 per-app locales, AppCompat below). */
+/**
+ * Per-app language: follows the system unless the user picks one (Android 13 per-app locales,
+ * AppCompat below). The choice is also kept in the app's own preferences, because AppCompat can
+ * only report it while an activity exists, and the Quick Settings tile calls the helper without
+ * one. Only the language tag is stored; nothing about the account or devices.
+ */
 object Language {
     val options = listOf("system", "en", "zh-CN", "zh-TW")
+    private const val PREFS = "language"
+    private const val KEY = "choice"
+    @Volatile private var prefs: SharedPreferences? = null
 
-    fun current(): String {
-        val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
-        return when {
-            tags.isEmpty() -> "system"
-            tags.startsWith("zh-TW") || tags.startsWith("zh-HK") || tags.contains("Hant") -> "zh-TW"
-            tags.startsWith("zh") -> "zh-CN"
-            tags.startsWith("en") -> "en"
-            else -> "system"
-        }
+    fun init(context: Context) {
+        prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     }
 
+    /** Called from an activity, where AppCompat knows the real setting (it may have been changed in system settings). */
+    fun syncFromSystem() {
+        val fromAppCompat = normalize(AppCompatDelegate.getApplicationLocales().toLanguageTags())
+        prefs?.edit { putString(KEY, fromAppCompat) }
+    }
+
+    fun current(): String = prefs?.getString(KEY, null)?.takeIf { it in options }
+        ?: normalize(AppCompatDelegate.getApplicationLocales().toLanguageTags())
+
     fun set(value: String) {
+        prefs?.edit { putString(KEY, value) }
         AppCompatDelegate.setApplicationLocales(
             if (value == "system") LocaleListCompat.getEmptyLocaleList() else LocaleListCompat.forLanguageTags(value),
         )
+    }
+
+    internal fun normalize(tags: String): String = when {
+        tags.isEmpty() -> "system"
+        tags.startsWith("zh-TW") || tags.startsWith("zh-HK") || tags.startsWith("zh-MO") || tags.contains("Hant") -> "zh-TW"
+        tags.startsWith("zh") -> "zh-CN"
+        tags.startsWith("en") -> "en"
+        else -> "system"
     }
 
     @StringRes
