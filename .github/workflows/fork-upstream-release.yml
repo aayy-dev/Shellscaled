@@ -230,7 +230,11 @@ jobs:
             exit 1
           fi
           export JAVA_HOME="$JAVA_HOME_21_X64"
+          # `yes` dies of SIGPIPE once sdkmanager exits; judge the pipeline by sdkmanager alone.
+          set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
+          set -o pipefail
+          test -f "$ANDROID_HOME/platforms/android-37.2/android.jar"
           export SHELLSCALED_KEYSTORE="$RUNNER_TEMP/shellscaled-release.jks"
           printf '%s' "$SHELLSCALED_KEYSTORE_B64" | base64 -d > "$SHELLSCALED_KEYSTORE"
           trap 'rm -f "$SHELLSCALED_KEYSTORE"' EXIT
