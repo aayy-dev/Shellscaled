@@ -17,6 +17,10 @@ The app is only a UI. It talks to the module's root helper (`/data/adb/modules/s
 
 The interface strings come from upstream's WebUI translations: `tools/import_webui_strings.py` regenerates `strings_webui.xml` for en, zh-CN and zh-TW. App-only strings live in `strings_app.xml`.
 
+## Branding
+
+At the owner's request, the launcher icon, Quick Settings tile and TV banner use Tailscale's 3×3 dot mark. They are drawn as vectors in `res/drawable` and `res/mipmap-anydpi`. Tailscale and its logo are trademarks of Tailscale Inc. This app is unofficial and is not affiliated with or endorsed by Tailscale.
+
 ## Compatibility
 
 - **Android versions:** minSdk 23 (Android 6), matching the module's NDK API level. targetSdk 37.

@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Shell prompt glyph inside the adaptive-icon safe zone. -->
+<!-- Tailscale dot-grid mark (Tailscale is a trademark of Tailscale Inc.; this app is unofficial). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <path android:pathData="M37,39 L53,54 L37,69" android:strokeColor="#FFFFFF" android:strokeWidth="7"
-        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" />
-    <path android:pathData="M58,69 L73,69" android:strokeColor="#5EC2FF" android:strokeWidth="7"
-        android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M33.8,39a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" android:fillAlpha="0.2" />
+    <path android:pathData="M48.8,39a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" android:fillAlpha="0.2" />
+    <path android:pathData="M63.8,39a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" android:fillAlpha="0.2" />
+    <path android:pathData="M33.8,54a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" />
+    <path android:pathData="M48.8,54a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" />
+    <path android:pathData="M63.8,54a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" />
+    <path android:pathData="M33.8,69a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" android:fillAlpha="0.2" />
+    <path android:pathData="M48.8,69a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" />
+    <path android:pathData="M63.8,69a5.2,5.2 0 1,0 10.4,0a5.2,5.2 0 1,0 -10.4,0z" android:fillColor="#FFFFFF" android:fillAlpha="0.2" />
 </vector>
