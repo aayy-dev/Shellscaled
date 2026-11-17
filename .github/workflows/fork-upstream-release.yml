@@ -5,7 +5,8 @@
 #   1. finds upstream releases (KyuubiRan/Shellscaled) that the fork has not mirrored yet,
 #   2. merges upstream main into the fork's main,
 #   3. checks out each upstream release tag, builds arm64, arm (32-bit) and amd64 (x86_64)
-#      packages with upstream's own scripts/build.py plus one universal ZIP, and
+#      packages with upstream's own scripts/build.py, builds and signs the Shellscaled app,
+#      bundles it into every ZIP plus one universal ZIP, and
 #   4. publishes a fork release with the same tag, title, channel and asset naming.
 name: Mirror upstream release (arm64 + arm + x86_64 + universal)
 
@@ -142,11 +143,13 @@ jobs:
       LATEST: ${{ matrix.latest }}
       GOTOOLCHAIN: local
     steps:
-      - name: Check out fork automation
+      - name: Check out fork automation and the app
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: fork
-          sparse-checkout: .github/fork
+          sparse-checkout: |
+            .github/fork
+            android
           persist-credentials: false
 
       - name: Check out the upstream release tag
@@ -211,16 +214,63 @@ jobs:
               assert f'architecture={arch}\n' in Path(f'.work/package/{arch}/module.prop').read_text(), arch
           PY
 
-      - name: Assemble and test the universal package
+      - name: Build, test and sign the Shellscaled app
+        working-directory: fork/android
+        env:
+          SHELLSCALED_KEYSTORE_B64: ${{ secrets.SHELLSCALED_KEYSTORE_B64 }}
+          SHELLSCALED_KEYSTORE_PASSWORD: ${{ secrets.SHELLSCALED_KEYSTORE_PASSWORD }}
+          SHELLSCALED_KEY_ALIAS: ${{ secrets.SHELLSCALED_KEY_ALIAS }}
+          SHELLSCALED_KEY_PASSWORD: ${{ secrets.SHELLSCALED_KEY_PASSWORD }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+          REVISION: ${{ steps.prepare.outputs.revision }}
         run: |
           set -euo pipefail
-          python3 fork/.github/fork/make_universal.py --src src --arch arm64 --arch arm --arch amd64
-          sh fork/.github/fork/test-universal.sh src/dist/*-universal.zip src
+          if [ -z "$SHELLSCALED_KEYSTORE_B64" ]; then
+            echo "::error::Missing SHELLSCALED_KEYSTORE_B64; the app must be signed with the fork's release key."
+            exit 1
+          fi
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
+          export SHELLSCALED_KEYSTORE="$RUNNER_TEMP/shellscaled-release.jks"
+          printf '%s' "$SHELLSCALED_KEYSTORE_B64" | base64 -d > "$SHELLSCALED_KEYSTORE"
+          trap 'rm -f "$SHELLSCALED_KEYSTORE"' EXIT
+          # The app's versionCode follows the module's, so every release upgrades cleanly.
+          code=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["versionCode"])' ../../src/.work/package/arm64/build-info.json)
+          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintRelease :app:assembleRelease \
+            -PappVersionCode="$code" -PappVersionName="$VERSION-r$REVISION"
+          apk=app/build/outputs/apk/release/app-release.apk
+          signer=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1)
+          if [ "$signer" != "$(cat ../.github/fork/app-signing-cert.sha256)" ]; then
+            echo "::error::The APK is not signed with the pinned release certificate."
+            exit 1
+          fi
+          name="Shellscaled-$VERSION-r$REVISION.apk"
+          cp "$apk" "../../src/dist/$name"
+          (cd ../../src/dist && sha256sum "$name" > "$name.sha256")
+
+      - name: Package every ZIP with the app and test the installers
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+          REVISION: ${{ steps.prepare.outputs.revision }}
+        run: |
+          set -euo pipefail
+          apk="src/dist/Shellscaled-$VERSION-r$REVISION.apk"
+          pkg() { echo "src/dist/Shellscaled-$VERSION-r$REVISION-$1.zip"; }
+          for arch in arm64 arm amd64; do
+            python3 fork/.github/fork/package_fork.py --src src --arch "$arch" --apk "$apk"
+          done
+          python3 fork/.github/fork/package_fork.py --src src --arch arm64 --arch arm --arch amd64 --name universal --apk "$apk"
+          sh fork/.github/fork/test-package.sh "$(pkg arm64)" src arm64-v8a:arm64 -- armeabi-v7a x86_64
+          sh fork/.github/fork/test-package.sh "$(pkg arm)" src armeabi-v7a:arm -- arm64-v8a x86_64
+          sh fork/.github/fork/test-package.sh "$(pkg amd64)" src x86_64:amd64 -- arm64-v8a armeabi-v7a
+          sh fork/.github/fork/test-package.sh "$(pkg universal)" src arm64-v8a:arm64 armeabi-v7a:arm x86_64:amd64 -- x86
           test -z "$(git -C src status --porcelain --untracked-files=all)"
           python3 - <<'PY'
           from pathlib import Path
           files = sorted(p.name for p in Path('src/dist').iterdir())
-          assert len(files) == 11 and len([f for f in files if f.endswith('.zip')]) == 4, files
+          assert len(files) == 13, files
+          assert len([f for f in files if f.endswith('.zip')]) == 4, files
+          assert len([f for f in files if f.endswith('.apk')]) == 1, files
           print('\n'.join(files))
           PY
 

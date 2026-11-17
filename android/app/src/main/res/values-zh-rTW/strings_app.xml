@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="access_checking" formatted="false">正在檢查 root 權限…</string>
+    <string name="access_no_root_title" formatted="false">需要 root 權限</string>
+    <string name="access_no_root_body" formatted="false">Shellscaled 透過 root 控制模組。Magisk：請允許授權提示。KernelSU 或 APatch：開啟管理器的「超級使用者」，允許 Shellscaled，然後選擇「重試」。</string>
+    <string name="access_module_title" formatted="false">未安裝模組</string>
+    <string name="access_module_body" formatted="false">請在 Magisk、KernelSU 或 APatch 中安裝 Shellscaled 模組並重新啟動，然後選擇「重試」。</string>
+    <string name="retry" formatted="false">重試</string>
+    <string name="close" formatted="false">關閉</string>
+    <string name="qr_show" formatted="false">顯示 QR 碼</string>
+    <string name="qr_title" formatted="false">掃描以開啟</string>
+    <string name="qr_body" formatted="false">使用其他裝置掃描此 QR 碼以開啟連結。</string>
+    <string name="module_version" formatted="false">模組 {version}</string>
+    <string name="devices_exit_node" formatted="false">使用中的出口節點</string>
+    <string name="devices_exit_option" formatted="false">可作為出口節點</string>
+    <string name="tile_label" formatted="false">Tailscale</string>
+    <string name="tile_unavailable" formatted="false">開啟 Shellscaled</string>
+</resources>

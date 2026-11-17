@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">Shellscaled</string>
+    <string name="access_checking" formatted="false">Checking root access…</string>
+    <string name="access_no_root_title" formatted="false">Root access needed</string>
+    <string name="access_no_root_body" formatted="false">Shellscaled controls the module through root. Magisk: allow the prompt. KernelSU or APatch: open the manager, go to Superuser, allow Shellscaled, then select Retry.</string>
+    <string name="access_module_title" formatted="false">Module not installed</string>
+    <string name="access_module_body" formatted="false">Install the Shellscaled module in Magisk, KernelSU or APatch, reboot, then select Retry.</string>
+    <string name="retry" formatted="false">Retry</string>
+    <string name="close" formatted="false">Close</string>
+    <string name="qr_show" formatted="false">Show QR code</string>
+    <string name="qr_title" formatted="false">Scan to open</string>
+    <string name="qr_body" formatted="false">Scan this code with another device to open the link.</string>
+    <string name="module_version" formatted="false">Module {version}</string>
+    <string name="devices_exit_node" formatted="false">Exit node in use</string>
+    <string name="devices_exit_option" formatted="false">Offers exit node</string>
+    <string name="tile_label" formatted="false">Tailscale</string>
+    <string name="tile_unavailable" formatted="false">Open Shellscaled</string>
+</resources>
