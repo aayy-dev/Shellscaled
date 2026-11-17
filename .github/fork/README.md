@@ -27,7 +27,7 @@ Fork-only automation that mirrors every new [upstream](https://github.com/Kyuubi
 
 **At install time** the front end reads `ro.product.cpu.abi` (the same property upstream checks). It moves that ABI's files into place, deletes `arch/`, restores upstream's `customize.sh`, and sources it, so upstream's checksum and architecture checks run unchanged. If those pass, it installs the bundled APK with `pm install -r`: streamed over stdin, with a `/data/local/tmp` fallback and a 120-second limit. A failure there doesn't fail the module install.
 
-**Removing the app.** Root managers run `uninstall.sh` early in boot, before Android's package manager exists. The hook is therefore placed first, so upstream's early exits can't skip it. It waits in the background (up to 10 minutes) for boot to finish, then runs `pm uninstall` on this module's own app only. This is unverified on devices. As a fallback, the app shows an "Uninstall this app" button once it finds the module gone.
+**Removing the app.** Root managers run `uninstall.sh` early in boot, before Android's package manager exists. The hook is therefore placed first, so upstream's early exits can't skip it. It waits in the background (up to 10 minutes) for boot to finish, then runs `pm uninstall` on this module's own app only. Verified under Magisk on the `play` emulator (see `android/README.md`); KernelSU and APatch are unverified. As a fallback, the app shows an "Uninstall this app" button once it finds the module gone.
 
 [`test-package.sh`](test-package.sh) runs on the host for all four ZIPs after every CI build. It checks that:
 - each accepted ABI ends with exactly the expected single-ABI tree;
@@ -70,6 +70,6 @@ Manual run options: `tag` (mirror one upstream tag), `rebuild` (replace an exist
 
 ## Limitations
 
-- The arm32, x86_64 and universal packages and the app have passed build checks, unit tests and the host installer test only. They have not been installed on a device or emulator; this Mac currently has no `Medium_Phone` AVD.
+- The arm64 package and the app were installed and exercised under Magisk on the owner-approved `play` emulator (arm64, API 37). See `android/README.md` for what was checked. The arm32, x86_64 and universal packages have passed build checks and the host installer test only.
 - In-app binary updates read only `KyuubiRan/tailscale-android-cli` releases, which ship only arm64. On arm32 and x86_64 installs, the binary updater offers nothing. Update by installing a newer fork ZIP.
 - A merge conflict between upstream `main` and fork-only commits fails the sync job, as does an upstream change that adds a workflow. Releases still build from the upstream tag.

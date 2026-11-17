@@ -89,6 +89,22 @@ class UiRenderTest {
     }
 
     @Test @Config(qualifiers = "w411dp-h891dp-port")
+    fun rejectedCommandShowsStatusAndReasonSeparately() {
+        // Seen on the play emulator: the two parts used to run together as "Not run Unsupported…".
+        val runner = FakeRunner().apply {
+            responses["status"] = { 0 to FakeRunner.status() }
+            responses["command"] = { 1 to """{"ok":false,"error":"Unsupported command format."}""" }
+        }
+        show(runner)
+        compose.onNodeWithText("Commands").performClick()
+        compose.onNodeWithText("tailscale version").performClick()
+        compose.onNodeWithText("Run command").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("Unsupported command format.")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Not run").assertExists()
+        compose.onNodeWithText("Unsupported command format.").assertExists()
+    }
+
+    @Test @Config(qualifiers = "w411dp-h891dp-port")
     fun noRootExplainsHowToGrant() {
         val vm = MainViewModel(HelperClient(FakeRunner(root = false)) { "system" })
         compose.setContent { ShellscaledTheme { ShellscaledApp(vm) } }

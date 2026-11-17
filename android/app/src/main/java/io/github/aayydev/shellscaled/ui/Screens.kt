@@ -381,7 +381,11 @@ fun CommandScreen(state: UiState, vm: MainViewModel) {
         SectionCard(stringResource(R.string.w_command_result)) {
             val result = state.commandResult
             when {
-                result == null && state.commandError != null -> Message(UiText.Joined(res(R.string.w_command_rejected), state.commandError), MessageKind.ERROR)
+                result == null && state.commandError != null -> {
+                    // Like the WebUI: the "Not run" status label, then the helper's reason on its own line.
+                    Message(res(R.string.w_command_rejected), MessageKind.ERROR)
+                    Message(state.commandError, MessageKind.ERROR)
+                }
                 result == null -> Message(res(R.string.w_command_waiting), MessageKind.MUTED)
                 else -> {
                     // A command that ran but failed (non-zero exit, timeout) keeps its output.

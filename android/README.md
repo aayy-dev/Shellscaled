@@ -60,12 +60,28 @@ When the module is removed, a hook at the top of `uninstall.sh` waits for boot t
 
 The signing secrets are in the `app-signing` environment (restricted to `main`). Only the workflow's `app` job can read them, and that job builds fork code only.
 
-## Not yet verified
+## Emulator verification
 
-- None of this has run on a device or emulator. The rooted `Medium_Phone` AVD must be recreated first (`docs/emulator.md`).
-- Untested end to end:
-  - Magisk/KernelSU/APatch grant flows;
-  - `pm install` from each manager's installer;
-  - the background uninstall hook;
-  - the Quick Settings tile;
-  - real TV hardware.
+Checked on 2026-11-17 on the owner's `play` AVD (Android 17 / API 37, arm64, Google Play image, Magisk 30.6, SELinux enforcing), using the v1.104.6-r1 arm64 release ZIP installed with `magisk --install-module`:
+
+- **Installer:** upstream's payload and architecture checks pass, then the bundled app installs through `pm`.
+- **Boot:** after a reboot the supervisor, `tailscaled` and `tailscale0` start. The app reads the real daemon state, and Magisk records an allow policy for the app.
+- **Commands:**
+  - `tailscale version` runs.
+  - `tailscale version;id` is refused by the helper. This exposed the "Not run" label running into the reason; it is now fixed and covered by a test.
+- **Settings:**
+  - Changing the language (Traditional Chinese, then back to system) applies immediately.
+  - "Block incoming connections" toggles `ShieldsUp` in the daemon, and toggling it back restores it.
+  - `CorpDNS` and `NetfilterMode` stay off.
+  - The update check reports that Tailscale is up to date.
+- **Devices and Taildrop:** both render.
+- **D-pad:** a visible focus ring moves between controls and skips disabled switches.
+- **Quick Settings tile:** it can be added, and while sign-in is needed, tapping it opens the app.
+- **Module removal:** with `remove` set, the next boot uninstalls the app. The module, its state, `tailscaled` and `tailscale0` are gone.
+
+Not yet verified:
+- Anything that needs a signed-in Tailscale account: connect/disconnect, devices, exit nodes, Taildrop transfers, and the sign-in QR with a real link.
+- KernelSU and APatch.
+- Real TV hardware.
+
+Observed on Magisk (upstream behavior, not fork code): upstream's live update waits for the installer's parent process. When the module is installed with `magisk --install-module`, that parent is the long-lived `magiskd`, so the live update gives up after its 120-second limit. The update then takes effect on the next reboot.

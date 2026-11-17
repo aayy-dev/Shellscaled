@@ -1,6 +1,6 @@
 # Fork roadmap: custom Tailscale core and a native Android app
 
-Status: Part 2 (native app) has an implemented and CI-built MVP with WebUI parity; see `android/README.md`. Part 1 is still a proposal. "Verified" means checked by reading code, compiling, or running a CI job; "inferred" means a conclusion from code that has not been runtime-tested. All runtime testing stays on the `Medium_Phone` emulator (AGENTS.md); that AVD is currently missing on the build Mac and has to be recreated per `docs/emulator.md` first.
+Status: Part 2 (native app) has an implemented and CI-built MVP with WebUI parity; see `android/README.md`. Part 1 is still a proposal. "Verified" means checked by reading code, compiling, or running a CI job; "inferred" means a conclusion from code that has not been runtime-tested. Runtime testing happens only on an emulator: `Medium_Phone` (AGENTS.md), or the owner-approved `play` AVD (arm64, API 37, Magisk), where the app and the arm64 package were exercised on 2026-11-17 (`android/README.md`).
 
 ## Ground rules for every phase
 
