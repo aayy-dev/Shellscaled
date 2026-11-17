@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fork-only automation: mirror upstream Shellscaled releases with arm64 + arm (32-bit) packages.
+"""Fork-only automation: mirror upstream Shellscaled releases with arm64, arm, amd64 and universal packages.
 
 This file and .github/workflows/fork-upstream-release.yml exist only in the fork.
 Upstream never touches them, so upstream commits cannot conflict with or break
@@ -158,8 +158,8 @@ def prepare_source(args):
 def notes(args):
     release = api(f"/repos/{args.upstream}/releases/tags/{args.tag}")
     body = release.get("body") or ""
-    # Upstream ships arm64 only; the fork's release carries both ABIs.
-    body = re.sub(r"\bfor ARM64 Android\b", "for ARM64 and ARM32 Android", body, count=1)
+    # Upstream ships arm64 only; the fork's release adds arm, x86_64 and a universal ZIP.
+    body = re.sub(r"\bfor ARM64 Android\b", "for ARM64, ARM32 and x86_64 Android", body, count=1)
     Path(args.out).write_text(body if body.endswith("\n") or not body else body + "\n", encoding="utf-8")
     outputs(title=release.get("name") or args.tag)
 

@@ -4,10 +4,10 @@
 # Every hour (or on demand) this workflow:
 #   1. finds upstream releases (KyuubiRan/Shellscaled) that the fork has not mirrored yet,
 #   2. merges upstream main into the fork's main,
-#   3. checks out each upstream release tag, builds arm64 + arm (32-bit) packages with
-#      upstream's own scripts/build.py, and
+#   3. checks out each upstream release tag, builds arm64, arm (32-bit) and amd64 (x86_64)
+#      packages with upstream's own scripts/build.py plus one universal ZIP, and
 #   4. publishes a fork release with the same tag, title, channel and asset naming.
-name: Mirror upstream release (arm64 + arm)
+name: Mirror upstream release (arm64 + arm + x86_64 + universal)
 
 on:
   schedule:
@@ -182,13 +182,13 @@ jobs:
             ndk=${ndk%/}
             echo "::warning::Upstream's NDK 30.0.16248370 is missing; using $(basename "$ndk")"
           fi
-          for tool in aarch64-linux-android23-clang armv7a-linux-androideabi23-clang; do
+          for tool in aarch64-linux-android23-clang armv7a-linux-androideabi23-clang x86_64-linux-android23-clang; do
             test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/$tool"
           done
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
 
-      - name: Build arm64 (upstream's verified core) and arm (compiled from the same source)
+      - name: Build arm64 (upstream's verified core), arm and amd64 (compiled from the same source)
         working-directory: src
         env:
           REVISION: ${{ steps.prepare.outputs.revision }}
@@ -197,19 +197,30 @@ jobs:
           set -euo pipefail
           python3 scripts/build.py --arch arm64 --package-only --revision "$REVISION" --release-channel "$CHANNEL"
           python3 scripts/build.py --arch arm --revision "$REVISION" --release-channel "$CHANNEL"
+          python3 scripts/build.py --arch amd64 --revision "$REVISION" --release-channel "$CHANNEL"
           test -z "$(git status --porcelain --untracked-files=all)"
           python3 - <<'PY'
           import json, subprocess
           from pathlib import Path
           head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-          for arch in ('arm64', 'arm'):
+          for arch in ('arm64', 'arm', 'amd64'):
               info = json.loads(Path(f'.work/package/{arch}/build-info.json').read_text())
               assert info['moduleTreeDirty'] is False, arch
               assert info['moduleSourceCommit'] == head, arch
               assert info['architecture'] == arch, arch
               assert f'architecture={arch}\n' in Path(f'.work/package/{arch}/module.prop').read_text(), arch
-          files = sorted(p.name for p in Path('dist').iterdir())
-          assert len(files) == 6 and len([f for f in files if f.endswith('.zip')]) == 2, files
+          PY
+
+      - name: Assemble and test the universal package
+        run: |
+          set -euo pipefail
+          python3 fork/.github/fork/make_universal.py --src src --arch arm64 --arch arm --arch amd64
+          sh fork/.github/fork/test-universal.sh src/dist/*-universal.zip src
+          test -z "$(git -C src status --porcelain --untracked-files=all)"
+          python3 - <<'PY'
+          from pathlib import Path
+          files = sorted(p.name for p in Path('src/dist').iterdir())
+          assert len(files) == 11 and len([f for f in files if f.endswith('.zip')]) == 4, files
           print('\n'.join(files))
           PY
 
